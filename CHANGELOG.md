@@ -1,5 +1,11 @@
 # 更新日志
 
+## 1.2.0
+
+- CLI 默认改为浏览器抓取模式，自动打开本机 Chrome 并监听播放器实际加载的字幕资源。
+- 新增 `--headed`、`--browser-timeout`、`--browser-channel`。
+- `--allow-api` 保留为显式接口模式。
+
 ## 1.1.0
 
 - 新增命令行字幕下载工具 `scripts/download-subtitle.mjs`。

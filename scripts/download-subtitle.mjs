@@ -24,12 +24,20 @@ async function main() {
         pageUrl: options.url,
         page: options.page
       })
-    : await downloadSubtitle(options.url, {
-        cookie,
-        page: options.page,
-        subtitleIndex: options.subtitleIndex,
-        allowApi: options.allowApi
-      });
+    : options.allowApi
+      ? await downloadSubtitle(options.url, {
+          cookie,
+          page: options.page,
+          subtitleIndex: options.subtitleIndex
+        })
+      : await downloadSubtitleWithBrowser(options.url, {
+          cookie,
+          page: options.page,
+          subtitleIndex: options.subtitleIndex,
+          browserTimeout: options.browserTimeout,
+          browserChannel: options.browserChannel,
+          headed: options.headed
+        });
 
   if (options.list) {
     printSubtitleList(result);
@@ -71,6 +79,9 @@ function parseArgs(args) {
     subtitleIndex: null,
     subtitleUrl: "",
     allowApi: false,
+    browserTimeout: 20000,
+    browserChannel: "chrome",
+    headed: false,
     cookie: "",
     cookieFile: "",
     list: false,
@@ -94,6 +105,12 @@ function parseArgs(args) {
       options.subtitleUrl = readValue(args, ++index, arg);
     } else if (arg === "--allow-api") {
       options.allowApi = true;
+    } else if (arg === "--headed") {
+      options.headed = true;
+    } else if (arg === "--browser-timeout") {
+      options.browserTimeout = Number(readValue(args, ++index, arg));
+    } else if (arg === "--browser-channel") {
+      options.browserChannel = readValue(args, ++index, arg);
     } else if (arg === "--cookie") {
       options.cookie = readValue(args, ++index, arg);
     } else if (arg === "--cookie-file") {
@@ -120,6 +137,10 @@ function parseArgs(args) {
     (!Number.isInteger(options.subtitleIndex) || options.subtitleIndex < 0)
   ) {
     throw new Error("--subtitle-index 必须是从 0 开始的整数");
+  }
+
+  if (!Number.isFinite(options.browserTimeout) || options.browserTimeout < 3000) {
+    throw new Error("--browser-timeout 必须是不小于 3000 的毫秒数");
   }
 
   return options;
@@ -149,13 +170,223 @@ function normalizeCookie(cookie) {
     .trim();
 }
 
-async function downloadSubtitle(url, options = {}) {
-  if (!options.allowApi) {
-    throw new Error(
-      "URL-only 模式无法确认播放器实际字幕源，已停止，避免下载到不对应的接口字幕。请先用页面插件点“命令”复制带 --subtitle-url 的命令；若你确认接口字幕就是要的内容，可加 --allow-api。"
-    );
+async function importPlaywright() {
+  try {
+    return await import("playwright-core");
+  } catch (error) {
+    throw new Error("浏览器模式需要依赖 playwright-core。请先在项目目录运行 npm install。");
+  }
+}
+
+function cookieHeaderToPlaywrightCookies(cookieHeader) {
+  return normalizeCookie(cookieHeader)
+    .split(";")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => {
+      const separator = part.indexOf("=");
+      if (separator <= 0) return null;
+
+      return {
+        name: part.slice(0, separator).trim(),
+        value: part.slice(separator + 1).trim(),
+        domain: ".bilibili.com",
+        path: "/",
+        secure: true,
+        sameSite: "Lax"
+      };
+    })
+    .filter(Boolean);
+}
+
+async function activateSubtitleInPage(page) {
+  await page.mouse.move(720, 820).catch(() => null);
+  await page.evaluate(() => {
+    const video = document.querySelector("video");
+    video?.play?.().catch?.(() => {});
+  }).catch(() => null);
+  await page.waitForTimeout(800);
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await page.mouse.move(720, 900).catch(() => null);
+    await page.waitForTimeout(400);
+    await page.evaluate(clickSubtitleControlInBrowser).catch(() => null);
+    await page.waitForTimeout(600);
+    await page.evaluate(clickSubtitleMenuItemInBrowser).catch(() => null);
+    await page.waitForTimeout(1200);
+  }
+}
+
+function clickSubtitleControlInBrowser() {
+  const candidates = Array.from(document.querySelectorAll([
+    "[aria-label*='字幕']",
+    "[title*='字幕']",
+    "[data-title*='字幕']",
+    "[class*='subtitle']",
+    "[class*='Subtitle']",
+    "[class*='caption']",
+    ".bpx-player-ctrl-subtitle",
+    ".bilibili-player-video-btn-subtitle"
+  ].join(",")));
+
+  const controls = candidates
+    .filter((element) => {
+      const rect = element.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return false;
+
+      const label = [
+        element.getAttribute("aria-label"),
+        element.getAttribute("title"),
+        element.getAttribute("data-title"),
+        element.getAttribute("class"),
+        element.textContent
+      ].filter(Boolean).join(" ");
+
+      if (!/字幕|subtitle|caption|cc/i.test(label)) return false;
+      if (/panel|text|item|container|wrap|list|menu/i.test(label) && !/button|btn|ctrl|control|switch|toggle|icon/i.test(label)) return false;
+
+      return true;
+    })
+    .sort((left, right) => {
+      const leftRect = left.getBoundingClientRect();
+      const rightRect = right.getBoundingClientRect();
+      return rightRect.bottom - leftRect.bottom;
+    });
+
+  controls[0]?.click?.();
+  return controls.length;
+}
+
+function clickSubtitleMenuItemInBrowser() {
+  const elements = Array.from(document.querySelectorAll("li, button, div, span"));
+  const item = elements.find((element) => {
+    const rect = element.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return false;
+    if (rect.width > 400 || rect.height > 120) return false;
+
+    const text = String(element.textContent || "").replace(/\s+/g, " ").trim();
+    return /中文|简体|繁体|AI|自动生成|字幕/.test(text) && !/关闭|设置|没有字幕|无法开启/.test(text);
+  });
+
+  item?.click?.();
+  return Boolean(item);
+}
+
+async function readBrowserSubtitleSnapshot(page) {
+  return page.evaluate(() => {
+    function cleanText(text) {
+      return String(text || "")
+        .replace(/\s+/g, " ")
+        .replace(/字幕已切换至.+$/, "")
+        .trim();
+    }
+
+    function isSubtitleResourceUrl(url) {
+      return /subtitle|caption|aisub|asr/i.test(url) && (/\.json(?:\?|$)/i.test(url) || /aisubtitle|subtitle/i.test(url));
+    }
+
+    function readVisibleSubtitleText() {
+      const selectors = [
+        ".bpx-player-subtitle-panel-text",
+        ".bpx-player-subtitle-panel",
+        ".bilibili-player-video-subtitle",
+        ".squirtle-subtitle-item",
+        "[class*='subtitle'][class*='text']",
+        "[class*='subtitle'][class*='panel']",
+        "[class*='caption']"
+      ];
+
+      for (const selector of selectors) {
+        for (const element of document.querySelectorAll(selector)) {
+          const text = cleanText(element.textContent || "");
+          if (text && text.length <= 120) return text;
+        }
+      }
+
+      return "";
+    }
+
+    const bodyText = cleanText(document.body?.innerText || "");
+    return {
+      title: document.title
+        .replace(/_哔哩哔哩_bilibili$/, "")
+        .replace(/-哔哩哔哩$/, "")
+        .trim(),
+      visibleSubtitle: readVisibleSubtitleText(),
+      noSubtitleText: /该视频没有字幕|没有字幕，无法|无法开启.*字幕|字幕不可用/.test(bodyText),
+      subtitleResources: Array.from(new Set(
+        performance
+          .getEntriesByType("resource")
+          .map((entry) => String(entry.name || ""))
+          .filter(isSubtitleResourceUrl)
+      )).slice(-20).reverse()
+    };
+  });
+}
+
+async function buildBrowserSubtitleCandidates({ captured, resourceUrls, visibleSubtitle, cookie }) {
+  const visible = normalizeForMatch(visibleSubtitle);
+  const candidates = [];
+  const seen = new Set();
+
+  for (const item of captured) {
+    const normalizedUrl = normalizeSubtitleUrl(item.url);
+    if (!normalizedUrl || seen.has(normalizedUrl)) continue;
+    seen.add(normalizedUrl);
+
+    const candidate = createBrowserSubtitleCandidate(normalizedUrl, item.rawSegments, visible);
+    if (candidate) candidates.push(candidate);
   }
 
+  for (const url of resourceUrls.slice(0, 12)) {
+    const normalizedUrl = normalizeSubtitleUrl(url);
+    if (!normalizedUrl || seen.has(normalizedUrl)) continue;
+    seen.add(normalizedUrl);
+
+    try {
+      const rawSegments = await fetchSubtitleSegments(normalizedUrl, cookie);
+      const candidate = createBrowserSubtitleCandidate(normalizedUrl, rawSegments, visible);
+      if (candidate) candidates.push(candidate);
+    } catch (error) {
+      // Stale or unrelated JSON resource.
+    }
+  }
+
+  return candidates
+    .sort((left, right) => right.score - left.score)
+    .map((candidate, index) => ({
+      ...candidate,
+      index
+    }));
+}
+
+function createBrowserSubtitleCandidate(url, rawSegments, visible) {
+  if (!rawSegments.length) return null;
+
+  const segments = buildTranscriptSegments(rawSegments);
+  const quality = analyzeTranscriptQuality(rawSegments, segments);
+  const text = normalizeForMatch(segments.map((segment) => segment.text).join(""));
+  const matchVisible = Boolean(visible && text.includes(visible.slice(0, Math.min(visible.length, 24))));
+
+  if (visible && !matchVisible) return null;
+  if (!quality.usable && !matchVisible) return null;
+
+  return {
+    index: 0,
+    id: null,
+    language: "",
+    languageName: matchVisible ? "播放器当前字幕" : "播放器字幕",
+    isAi: /ai|asr|subtitle/i.test(url),
+    sourceType: "浏览器",
+    url,
+    rawSegments,
+    quality,
+    matchVisible,
+    score: (matchVisible ? 1000 : 0) + quality.meaningfulChars
+  };
+}
+
+async function downloadSubtitle(url, options = {}) {
   const identity = parseVideoIdentity(url, options);
   if (!identity.bvid && !identity.aid) {
     throw new Error("没有从 URL 识别到 bvid 或 aid");
@@ -208,6 +439,113 @@ async function downloadSubtitle(url, options = {}) {
     timestampText: formatTimestampText(segments),
     srtText: formatSrtText(rawSegments)
   };
+}
+
+async function downloadSubtitleWithBrowser(url, options = {}) {
+  const playwright = await importPlaywright();
+  const browser = await playwright.chromium.launch({
+    channel: options.browserChannel || "chrome",
+    headless: !options.headed,
+    args: ["--autoplay-policy=no-user-gesture-required"]
+  });
+
+  const context = await browser.newContext({
+    userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    locale: "zh-CN",
+    viewport: { width: 1440, height: 960 }
+  });
+
+  if (options.cookie) {
+    await context.addCookies(cookieHeaderToPlaywrightCookies(options.cookie));
+  }
+
+  const page = await context.newPage();
+  const captured = [];
+  const resourceUrls = new Set();
+
+  page.on("response", async (response) => {
+    const responseUrl = response.url();
+    if (!isSubtitleResourceUrl(responseUrl)) return;
+    resourceUrls.add(responseUrl);
+
+    try {
+      const json = await response.json();
+      const rawSegments = normalizeSegments(json.body || json.data?.body || []);
+      if (rawSegments.length) {
+        captured.push({
+          url: responseUrl,
+          rawSegments,
+          source: "response"
+        });
+      }
+    } catch (error) {
+      // Some matched resources are not subtitle JSON or are no longer readable.
+    }
+  });
+
+  try {
+    await page.goto(url, {
+      waitUntil: "domcontentloaded",
+      timeout: options.browserTimeout
+    });
+    await page.waitForLoadState("networkidle", { timeout: 6000 }).catch(() => null);
+    await activateSubtitleInPage(page);
+    await page.waitForTimeout(3500);
+
+    const snapshot = await readBrowserSubtitleSnapshot(page);
+    for (const subtitleUrl of snapshot.subtitleResources) {
+      resourceUrls.add(subtitleUrl);
+    }
+
+    const video = await readVideoFromPageUrl(url, options.cookie, options.page);
+    if (snapshot.title) {
+      video.title = snapshot.title;
+    }
+
+    const candidates = await buildBrowserSubtitleCandidates({
+      captured,
+      resourceUrls: Array.from(resourceUrls),
+      visibleSubtitle: snapshot.visibleSubtitle,
+      cookie: options.cookie
+    });
+
+    if (!candidates.length) {
+      if (snapshot.noSubtitleText) {
+        throw new Error("播放器提示该视频没有字幕，未下载任何接口字幕。");
+      }
+
+      throw new Error("浏览器模式没有捕获到播放器字幕资源。请确认网页播放器里能打开字幕；若只有画面硬字幕，需要 OCR/语音识别。");
+    }
+
+    const selectedIndex = chooseSubtitleIndex(candidates, options.subtitleIndex);
+    const selectedSubtitle = candidates[selectedIndex];
+    const rawSegments = selectedSubtitle.rawSegments;
+    const segments = buildTranscriptSegments(rawSegments);
+    const quality = analyzeTranscriptQuality(rawSegments, segments);
+
+    return {
+      video,
+      subtitles: candidates.map(({ rawSegments: _rawSegments, quality: _quality, ...subtitle }) => subtitle),
+      selectedIndex,
+      selectedSubtitle: {
+        index: selectedSubtitle.index,
+        id: selectedSubtitle.id,
+        language: selectedSubtitle.language,
+        languageName: selectedSubtitle.languageName,
+        isAi: selectedSubtitle.isAi,
+        sourceType: selectedSubtitle.sourceType,
+        url: selectedSubtitle.url
+      },
+      rawSegments,
+      segments,
+      quality,
+      plainText: formatPlainText(segments),
+      timestampText: formatTimestampText(segments),
+      srtText: formatSrtText(rawSegments)
+    };
+  } finally {
+    await browser.close().catch(() => null);
+  }
 }
 
 async function downloadSubtitleUrl(subtitleUrl, options = {}) {
@@ -392,6 +730,10 @@ function normalizeSubtitleUrl(rawUrl) {
   return rawUrl;
 }
 
+function isSubtitleResourceUrl(url) {
+  return /subtitle|caption|aisub|asr/i.test(url) && (/\.json(?:\?|$)/i.test(url) || /aisubtitle|subtitle/i.test(url));
+}
+
 function chooseSubtitleIndex(subtitles, requestedIndex) {
   const requested = Number(requestedIndex);
   if (Number.isInteger(requested) && requested >= 0 && requested < subtitles.length) {
@@ -565,6 +907,12 @@ function stripNonMeaningfulChars(text) {
     .trim();
 }
 
+function normalizeForMatch(text) {
+  return String(text || "")
+    .replace(/[\s\d，。,.!?！？、~～…·\-—_（）()【】[\]{}<>《》"'“”‘’:：;；/\\|+*=#@￥$%^&`♪♫♬♩]/g, "")
+    .trim();
+}
+
 function formatContent(format, result) {
   if (format === "txt") return `${result.plainText}\n`;
   if (format === "srt") return `${result.srtText}\n`;
@@ -693,18 +1041,23 @@ function printHelp() {
   -i, --subtitle-index <序号>  指定字幕序号，默认自动选择中文/AI
       --list                   只列出字幕，不写文件
       --subtitle-url <URL>     直接下载指定字幕 JSON URL，适合配合页面插件复制的命令
-      --allow-api              允许直接使用 B 站接口字幕；可能和播放器画面字幕不一致
+      --allow-api              跳过浏览器抓取，直接使用 B 站接口字幕；可能和播放器画面字幕不一致
+      --headed                 浏览器抓取时显示 Chrome 窗口，方便观察
+      --browser-timeout <毫秒> 浏览器页面加载超时，默认 20000
+      --browser-channel <名称> Playwright 浏览器 channel，默认 chrome
       --cookie <Cookie>        传入 B 站登录 Cookie
       --cookie-file <文件>     从文件读取 B 站登录 Cookie
   -h, --help                   显示帮助
 
 示例：
+  node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx"
+  node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx" --headed
+  node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx" --format txt --out ./downloads
   node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx" --allow-api
-  node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx" --allow-api --format txt --out ./downloads
-  node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx" --allow-api --cookie-file ./bili.cookie.txt
+  node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx" --cookie-file ./bili.cookie.txt
   node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx" --subtitle-url "https://..."
 
 也可以用环境变量传 Cookie：
-  BILI_COOKIE="SESSDATA=..." node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx" --allow-api
+  BILI_COOKIE="SESSDATA=..." node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx"
 `.trim());
 }
