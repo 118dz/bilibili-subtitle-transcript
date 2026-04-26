@@ -30,3 +30,39 @@
 ## 发布
 
 发布用 zip 包生成后会放在 `dist/` 目录。Chrome Web Store 上传时选择 zip 文件即可。
+
+## 命令行下载字幕
+
+也可以不打开浏览器，直接用 B 站 URL 下载字幕：
+
+```bash
+node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx"
+```
+
+默认会写入 `downloads/` 目录，并同时生成：
+
+- `.txt`：整理后的文字稿
+- `.srt`：带时间轴的字幕文件
+- `.json`：原始分段和元数据
+
+常用选项：
+
+```bash
+node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx" --format txt --out ./downloads
+node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx" --list
+node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx?p=2" --page 2
+```
+
+有些 AI 字幕需要登录态。如果 URL 直接下载提示没有字幕，可以从浏览器复制 B 站 Cookie 到文本文件，然后：
+
+```bash
+node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx" --cookie-file ./bili.cookie.txt
+```
+
+或使用环境变量：
+
+```bash
+BILI_COOKIE="SESSDATA=..." node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx"
+```
+
+注意：命令行模式只能下载 B 站接口返回的字幕文件，不能读取播放器画面里的硬字幕；这类视频需要 OCR 或语音识别。

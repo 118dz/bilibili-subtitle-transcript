@@ -1,0 +1,14 @@
+{
+  "name": "bilibili-subtitle-transcript",
+  "version": "1.1.0",
+  "private": true,
+  "description": "Chrome extension and CLI tools for downloading Bilibili subtitles as transcripts.",
+  "bin": {
+    "bili-subtitle": "./scripts/download-subtitle.mjs"
+  },
+  "scripts": {
+    "check": "node --check background.js && node --check content-script.js && node --check popup.js && node --check scripts/generate-icons.mjs && node --check scripts/download-subtitle.mjs",
+    "package": "./scripts/package.sh",
+    "download": "node scripts/download-subtitle.mjs"
+  }
+}

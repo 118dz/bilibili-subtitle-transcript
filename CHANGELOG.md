@@ -1,5 +1,11 @@
 # 更新日志
 
+## 1.1.0
+
+- 新增命令行字幕下载工具 `scripts/download-subtitle.mjs`。
+- 支持给定 B 站 URL 直接导出 TXT、SRT 和 JSON。
+- 支持通过 `--cookie`、`--cookie-file` 或 `BILI_COOKIE` 读取登录态字幕。
+
 ## 1.0.0
 
 - 支持读取 B 站 AI 字幕和人工字幕。
