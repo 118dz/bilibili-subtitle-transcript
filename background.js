@@ -13,6 +13,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 async function fetchTranscript(payload = {}) {
+  if (detectPlatform(payload.url, payload.pageInfo) === "youtube") {
+    return fetchYouTubeTranscript(payload);
+  }
+
+  return fetchBilibiliTranscript(payload);
+}
+
+async function fetchBilibiliTranscript(payload = {}) {
   const identity = parseVideoIdentity(payload.url, payload.pageInfo);
   if (!identity.bvid && !identity.aid && !identity.cid) {
     throw new Error("没有识别到当前视频的 bvid/cid，请确认打开的是 B 站视频播放页。");
@@ -165,6 +173,84 @@ async function fetchVisibleMatchedApiSubtitles({ bvid, aid, cid, visibleSubtitle
     .slice(0, 3);
 }
 
+async function fetchYouTubeTranscript(payload = {}) {
+  const identity = parseYouTubeIdentity(payload.url, payload.pageInfo);
+  if (!identity.videoId) {
+    throw new Error("没有识别到当前 YouTube 视频 ID，请确认打开的是 YouTube 视频页。");
+  }
+
+  const rawPageInfo = payload.pageInfo || {};
+  const pageInfo = !rawPageInfo.videoId || rawPageInfo.videoId === identity.videoId ? rawPageInfo : {};
+  const fetchedInfo = pageInfo.subtitleTracks?.length
+    ? {}
+    : await fetchYouTubePageInfo(payload.url).catch(() => ({}));
+  const subtitleTracks = pageInfo.subtitleTracks?.length ? pageInfo.subtitleTracks : (fetchedInfo.subtitleTracks || []);
+  const subtitles = normalizeYouTubeSubtitles(subtitleTracks).map((item, index) => ({
+    ...item,
+    index
+  }));
+
+  if (!subtitles.length) {
+    throw new Error("当前 YouTube 视频没有检测到可读取字幕。请先在播放器里开启字幕，或确认视频本身有字幕轨。");
+  }
+
+  const selectedIndex = chooseSubtitleIndex(subtitles, payload.subtitleIndex);
+  const selectedSubtitle = subtitles[selectedIndex];
+  const rawSegments = await fetchYouTubeSubtitleSegments(selectedSubtitle.url);
+  const segments = buildTranscriptSegments(rawSegments);
+  const quality = analyzeTranscriptQuality(rawSegments, segments);
+
+  if (!rawSegments.length) {
+    throw new Error("YouTube 字幕文件里没有读取到正文内容。");
+  }
+
+  const title = pageInfo.title || fetchedInfo.title || "youtube-transcript";
+
+  return {
+    video: {
+      platform: "youtube",
+      title,
+      partTitle: "",
+      videoId: identity.videoId
+    },
+    subtitles,
+    selectedIndex,
+    segments,
+    rawSegments,
+    quality,
+    plainText: formatPlainText(segments),
+    timestampText: formatTimestampText(segments),
+    srtText: formatSrtText(rawSegments),
+    fileBaseName: safeFileName(title)
+  };
+}
+
+async function fetchYouTubePageInfo(url) {
+  const html = await requestText(url);
+  const playerResponse = extractYouTubePlayerResponse(html);
+  const tracks = playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
+
+  return {
+    title: playerResponse?.videoDetails?.title || "",
+    videoId: playerResponse?.videoDetails?.videoId || "",
+    subtitleTracks: tracks
+  };
+}
+
+function extractYouTubePlayerResponse(text) {
+  const markerIndex = String(text || "").indexOf("ytInitialPlayerResponse");
+  if (markerIndex < 0) return null;
+
+  const json = extractJsonObject(text, markerIndex);
+  if (!json) return null;
+
+  try {
+    return JSON.parse(json);
+  } catch (error) {
+    return null;
+  }
+}
+
 async function fetchSubtitleSegments(url) {
   const subtitleJson = await requestJson(url, { skipBiliCodeCheck: true });
   return normalizeSegments(subtitleJson.body || subtitleJson.data?.body || []);
@@ -182,6 +268,200 @@ function normalizeCandidateUrls(urls) {
   }
 
   return result;
+}
+
+function detectPlatform(urlText = "", pageInfo = {}) {
+  if (pageInfo.platform) return pageInfo.platform;
+
+  try {
+    const url = new URL(urlText);
+    if (/youtube\.com$|youtu\.be$/i.test(url.hostname.replace(/^www\./, ""))) return "youtube";
+  } catch (error) {
+    // Fall through to Bilibili for existing behavior.
+  }
+
+  return "bilibili";
+}
+
+function parseYouTubeIdentity(urlText = "", pageInfo = {}) {
+  const identity = {
+    videoId: pageInfo.videoId || ""
+  };
+
+  try {
+    const url = new URL(urlText);
+    const host = url.hostname.replace(/^www\./, "");
+
+    if (host === "youtu.be") {
+      identity.videoId = url.pathname.split("/").filter(Boolean)[0] || identity.videoId;
+    } else if (/youtube\.com$/i.test(host)) {
+      identity.videoId = url.searchParams.get("v") || identity.videoId;
+      const shortsMatch = url.pathname.match(/^\/shorts\/([^/?#]+)/);
+      if (shortsMatch) identity.videoId = shortsMatch[1];
+    }
+  } catch (error) {
+    // Popup can pass pageInfo when URL parsing is not enough.
+  }
+
+  return identity;
+}
+
+function normalizeYouTubeSubtitles(items) {
+  return items
+    .map((item, index) => {
+      const url = normalizeSubtitleUrl(item.baseUrl || item.url || "");
+      const label = readYouTubeLabel(item.name) || item.languageName || item.language || `字幕 ${index + 1}`;
+      const language = item.languageCode || item.language || "";
+      const isAi = item.kind === "asr" || /自动|auto-generated|asr/i.test(`${label} ${item.kind || ""}`);
+
+      return {
+        index,
+        id: item.vssId || item.id || null,
+        language,
+        languageName: label,
+        isAi,
+        sourceType: isAi ? "自动字幕" : "字幕",
+        url
+      };
+    })
+    .filter((item) => item.url);
+}
+
+function readYouTubeLabel(name) {
+  if (!name) return "";
+  if (typeof name === "string") return name;
+  if (name.simpleText) return name.simpleText;
+  if (Array.isArray(name.runs)) {
+    return name.runs.map((run) => run.text || "").join("");
+  }
+  return "";
+}
+
+async function fetchYouTubeSubtitleSegments(url) {
+  const jsonUrl = withYouTubeCaptionFormat(url, "json3");
+  const text = await requestText(jsonUrl);
+
+  try {
+    return normalizeYouTubeJson3Segments(JSON.parse(text));
+  } catch (error) {
+    return normalizeYouTubeXmlSegments(await requestText(url));
+  }
+}
+
+function withYouTubeCaptionFormat(rawUrl, format) {
+  const url = normalizeSubtitleUrl(rawUrl);
+  if (/[?&]fmt=/.test(url)) {
+    return url.replace(/([?&])fmt=[^&]*/i, `$1fmt=${encodeURIComponent(format)}`);
+  }
+
+  return `${url}${url.includes("?") ? "&" : "?"}fmt=${encodeURIComponent(format)}`;
+}
+
+function normalizeYouTubeJson3Segments(json) {
+  const events = Array.isArray(json?.events) ? json.events : [];
+  const segments = events
+    .map((event, index) => {
+      const text = cleanText((event.segs || []).map((seg) => seg.utf8 || "").join(""));
+      const from = Number(event.tStartMs || 0) / 1000;
+      const duration = Number(event.dDurationMs || 0) / 1000;
+
+      return {
+        index: index + 1,
+        from,
+        to: from + Math.max(duration, 0.8),
+        text
+      };
+    })
+    .filter((item) => item.text);
+
+  return removeDuplicateSegments(segments);
+}
+
+function normalizeYouTubeXmlSegments(xml) {
+  const items = [];
+  const pattern = /<text\b([^>]*)>([\s\S]*?)<\/text>/gi;
+  let match;
+
+  while ((match = pattern.exec(xml))) {
+    const attrs = match[1] || "";
+    const from = Number(readXmlAttribute(attrs, "start") || 0);
+    const duration = Number(readXmlAttribute(attrs, "dur") || 0);
+    const text = cleanText(decodeHtmlEntities(match[2] || ""));
+
+    if (!text) continue;
+    items.push({
+      index: items.length + 1,
+      from: Number.isFinite(from) ? from : 0,
+      to: (Number.isFinite(from) ? from : 0) + (Number.isFinite(duration) ? duration : 2),
+      text
+    });
+  }
+
+  return removeDuplicateSegments(items);
+}
+
+function readXmlAttribute(attrs, name) {
+  const match = attrs.match(new RegExp(`${name}="([^"]*)"`, "i"));
+  return match?.[1] || "";
+}
+
+function decodeHtmlEntities(text) {
+  const named = {
+    amp: "&",
+    lt: "<",
+    gt: ">",
+    quot: "\"",
+    apos: "'",
+    "#39": "'"
+  };
+
+  return String(text || "").replace(/&(#x?[0-9a-f]+|[a-z]+);/gi, (entity, body) => {
+    const key = body.toLowerCase();
+    if (named[key]) return named[key];
+    if (key.startsWith("#x")) return String.fromCodePoint(Number.parseInt(key.slice(2), 16));
+    if (key.startsWith("#")) return String.fromCodePoint(Number.parseInt(key.slice(1), 10));
+    return entity;
+  });
+}
+
+function extractJsonObject(text, markerIndex) {
+  const start = text.indexOf("{", markerIndex);
+  if (start < 0) return "";
+
+  let depth = 0;
+  let inString = false;
+  let quote = "";
+  let escaped = false;
+
+  for (let index = start; index < text.length; index += 1) {
+    const char = text[index];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === quote) {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === "\"" || char === "'") {
+      inString = true;
+      quote = char;
+      continue;
+    }
+
+    if (char === "{") depth += 1;
+    if (char === "}") depth -= 1;
+
+    if (depth === 0) {
+      return text.slice(start, index + 1);
+    }
+  }
+
+  return "";
 }
 
 function parseVideoIdentity(urlText = "", pageInfo = {}) {
@@ -342,6 +622,7 @@ function normalizeSubtitleUrl(rawUrl) {
   if (!rawUrl) return "";
   if (rawUrl.startsWith("//")) return `https:${rawUrl}`;
   if (rawUrl.startsWith("http://")) return rawUrl.replace(/^http:\/\//, "https://");
+  if (rawUrl.startsWith("/api/timedtext") || rawUrl.startsWith("/timedtext")) return `https://www.youtube.com${rawUrl}`;
   if (rawUrl.startsWith("/")) return `https://www.bilibili.com${rawUrl}`;
   return rawUrl;
 }
@@ -430,7 +711,7 @@ function analyzeTranscriptQuality(rawSegments, mergedSegments) {
     musicLikeRatio,
     meaningfulChars: meaningfulText.length,
     warning: unusable
-      ? "B站返回的字幕轨几乎没有有效文字，画面里的硬字幕需要 OCR 或语音识别提取。"
+      ? "字幕轨几乎没有有效文字，画面里的硬字幕需要 OCR 或语音识别提取。"
       : ""
   };
 }
@@ -635,4 +916,20 @@ async function requestJson(url, options = {}) {
   }
 
   return json;
+}
+
+async function requestText(url) {
+  const response = await fetch(url, {
+    credentials: "include",
+    cache: "no-store",
+    headers: {
+      "Accept": "application/json, text/xml, text/plain, */*"
+    }
+  });
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+
+  return response.text();
 }

@@ -25,11 +25,16 @@ async function main() {
         page: options.page
       })
     : options.allowApi
-      ? await downloadSubtitle(options.url, {
-          cookie,
-          page: options.page,
-          subtitleIndex: options.subtitleIndex
-        })
+      ? isYouTubeUrl(options.url)
+        ? await downloadYouTubeSubtitle(options.url, {
+            cookie,
+            subtitleIndex: options.subtitleIndex
+          })
+        : await downloadSubtitle(options.url, {
+            cookie,
+            page: options.page,
+            subtitleIndex: options.subtitleIndex
+          })
       : await downloadSubtitleWithBrowser(options.url, {
           cookie,
           page: options.page,
@@ -178,7 +183,7 @@ async function importPlaywright() {
   }
 }
 
-function cookieHeaderToPlaywrightCookies(cookieHeader) {
+function cookieHeaderToPlaywrightCookies(cookieHeader, domain = ".bilibili.com") {
   return normalizeCookie(cookieHeader)
     .split(";")
     .map((part) => part.trim())
@@ -190,7 +195,7 @@ function cookieHeaderToPlaywrightCookies(cookieHeader) {
       return {
         name: part.slice(0, separator).trim(),
         value: part.slice(separator + 1).trim(),
-        domain: ".bilibili.com",
+        domain,
         path: "/",
         secure: true,
         sameSite: "Lax"
@@ -441,7 +446,154 @@ async function downloadSubtitle(url, options = {}) {
   };
 }
 
+async function downloadYouTubeSubtitle(url, options = {}) {
+  const pageInfo = await fetchYouTubePageInfo(url, options.cookie);
+  return buildYouTubeSubtitleResult(url, pageInfo, options);
+}
+
+async function downloadYouTubeSubtitleWithBrowser(url, options = {}) {
+  const playwright = await importPlaywright();
+  const browser = await playwright.chromium.launch({
+    channel: options.browserChannel || "chrome",
+    headless: !options.headed,
+    args: ["--autoplay-policy=no-user-gesture-required"]
+  });
+
+  const context = await browser.newContext({
+    userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    locale: "zh-CN",
+    viewport: { width: 1440, height: 960 }
+  });
+
+  if (options.cookie) {
+    await context.addCookies(cookieHeaderToPlaywrightCookies(options.cookie, ".youtube.com"));
+  }
+
+  const page = await context.newPage();
+
+  try {
+    await page.goto(url, {
+      waitUntil: "domcontentloaded",
+      timeout: options.browserTimeout
+    });
+    await page.waitForLoadState("networkidle", { timeout: 6000 }).catch(() => null);
+    await page.waitForTimeout(1500);
+
+    const pageInfo = await page.evaluate(() => {
+      function extractJsonObject(text, markerIndex) {
+        const start = text.indexOf("{", markerIndex);
+        if (start < 0) return "";
+
+        let depth = 0;
+        let inString = false;
+        let quote = "";
+        let escaped = false;
+
+        for (let index = start; index < text.length; index += 1) {
+          const char = text[index];
+          if (inString) {
+            if (escaped) escaped = false;
+            else if (char === "\\") escaped = true;
+            else if (char === quote) inString = false;
+            continue;
+          }
+
+          if (char === "\"" || char === "'") {
+            inString = true;
+            quote = char;
+            continue;
+          }
+
+          if (char === "{") depth += 1;
+          if (char === "}") depth -= 1;
+          if (depth === 0) return text.slice(start, index + 1);
+        }
+
+        return "";
+      }
+
+      function readPlayerResponse() {
+        if (window.ytInitialPlayerResponse) return window.ytInitialPlayerResponse;
+        for (const script of document.scripts) {
+          const text = script.textContent || "";
+          const markerIndex = text.indexOf("ytInitialPlayerResponse");
+          if (markerIndex < 0) continue;
+          const json = extractJsonObject(text, markerIndex);
+          if (!json) continue;
+          try {
+            return JSON.parse(json);
+          } catch (error) {
+            return null;
+          }
+        }
+        return null;
+      }
+
+      const playerResponse = readPlayerResponse();
+      return {
+        title: playerResponse?.videoDetails?.title || document.title.replace(/ - YouTube$/, "").trim(),
+        videoId: playerResponse?.videoDetails?.videoId || new URL(location.href).searchParams.get("v") || "",
+        subtitleTracks: playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks || []
+      };
+    });
+
+    if (!pageInfo.subtitleTracks?.length) {
+      const fallback = await fetchYouTubePageInfo(url, options.cookie).catch(() => ({}));
+      if (fallback.subtitleTracks?.length) {
+        pageInfo.subtitleTracks = fallback.subtitleTracks;
+        pageInfo.title ||= fallback.title;
+        pageInfo.videoId ||= fallback.videoId;
+      }
+    }
+
+    return buildYouTubeSubtitleResult(url, pageInfo, options);
+  } finally {
+    await browser.close().catch(() => null);
+  }
+}
+
+async function buildYouTubeSubtitleResult(url, pageInfo, options = {}) {
+  const identity = parseYouTubeIdentity(url);
+  const subtitles = normalizeYouTubeSubtitles(pageInfo.subtitleTracks || []);
+  if (!subtitles.length) {
+    throw new Error("当前 YouTube 视频没有检测到可下载字幕。请确认播放器里有字幕轨。");
+  }
+
+  const selectedIndex = chooseSubtitleIndex(subtitles, options.subtitleIndex);
+  const selectedSubtitle = subtitles[selectedIndex];
+  const rawSegments = await fetchYouTubeSubtitleSegments(selectedSubtitle.url, options.cookie);
+  if (!rawSegments.length) {
+    throw new Error("YouTube 字幕文件里没有正文内容");
+  }
+
+  const segments = buildTranscriptSegments(rawSegments);
+  const quality = analyzeTranscriptQuality(rawSegments, segments);
+  const title = pageInfo.title || "youtube-transcript";
+
+  return {
+    video: {
+      platform: "youtube",
+      title,
+      partTitle: "",
+      videoId: pageInfo.videoId || identity.videoId
+    },
+    subtitles,
+    selectedIndex,
+    selectedSubtitle,
+    rawSegments,
+    segments,
+    quality,
+    plainText: formatPlainText(segments),
+    timestampText: formatTimestampText(segments),
+    srtText: formatSrtText(rawSegments)
+  };
+}
+
 async function downloadSubtitleWithBrowser(url, options = {}) {
+  if (isYouTubeUrl(url)) {
+    return downloadYouTubeSubtitleWithBrowser(url, options);
+  }
+
   const playwright = await importPlaywright();
   const browser = await playwright.chromium.launch({
     channel: options.browserChannel || "chrome",
@@ -551,7 +703,7 @@ async function downloadSubtitleWithBrowser(url, options = {}) {
 async function downloadSubtitleUrl(subtitleUrl, options = {}) {
   const video = await readVideoFromPageUrl(options.pageUrl, options.cookie, options.page);
   const normalizedUrl = normalizeSubtitleUrl(subtitleUrl);
-  const rawSegments = await fetchSubtitleSegments(normalizedUrl, options.cookie);
+  const rawSegments = await fetchAnySubtitleSegments(normalizedUrl, options.cookie);
   if (!rawSegments.length) {
     throw new Error("字幕源 URL 里没有正文内容");
   }
@@ -567,7 +719,7 @@ async function downloadSubtitleUrl(subtitleUrl, options = {}) {
         id: null,
         language: "",
         languageName: "指定字幕源",
-        isAi: /ai|asr|subtitle/i.test(normalizedUrl),
+        isAi: /ai|asr|subtitle|timedtext/i.test(normalizedUrl),
         sourceType: "字幕源",
         url: normalizedUrl
       }
@@ -578,7 +730,7 @@ async function downloadSubtitleUrl(subtitleUrl, options = {}) {
       id: null,
       language: "",
       languageName: "指定字幕源",
-      isAi: /ai|asr|subtitle/i.test(normalizedUrl),
+      isAi: /ai|asr|subtitle|timedtext/i.test(normalizedUrl),
       sourceType: "字幕源",
       url: normalizedUrl
     },
@@ -604,6 +756,16 @@ async function readVideoFromPageUrl(pageUrl, cookie, pageOverride) {
   }
 
   try {
+    if (isYouTubeUrl(pageUrl)) {
+      const pageInfo = await fetchYouTubePageInfo(pageUrl, cookie).catch(() => ({}));
+      return {
+        platform: "youtube",
+        title: pageInfo.title || "youtube-transcript",
+        partTitle: "",
+        videoId: pageInfo.videoId || parseYouTubeIdentity(pageUrl).videoId
+      };
+    }
+
     const identity = parseVideoIdentity(pageUrl, { page: pageOverride });
     const view = await fetchView(identity, cookie);
     const page = selectPage(identity, view);
@@ -626,6 +788,95 @@ async function readVideoFromPageUrl(pageUrl, cookie, pageOverride) {
       page: 1
     };
   }
+}
+
+function isYouTubeUrl(urlText = "") {
+  try {
+    const url = new URL(urlText);
+    const host = url.hostname.replace(/^www\./, "");
+    return host === "youtube.com" || host === "m.youtube.com" || host === "youtu.be";
+  } catch (error) {
+    return false;
+  }
+}
+
+function parseYouTubeIdentity(urlText = "") {
+  const identity = { videoId: "" };
+
+  try {
+    const url = new URL(urlText);
+    const host = url.hostname.replace(/^www\./, "");
+
+    if (host === "youtu.be") {
+      identity.videoId = url.pathname.split("/").filter(Boolean)[0] || "";
+    } else if (host === "youtube.com" || host === "m.youtube.com") {
+      identity.videoId = url.searchParams.get("v") || "";
+      const shortsMatch = url.pathname.match(/^\/shorts\/([^/?#]+)/);
+      if (shortsMatch) identity.videoId = shortsMatch[1];
+    }
+  } catch (error) {
+    // Let the caller surface a clearer no-subtitle error.
+  }
+
+  return identity;
+}
+
+async function fetchYouTubePageInfo(url, cookie = "") {
+  const html = await requestText(url, cookie, {
+    referer: "https://www.youtube.com/"
+  });
+  const playerResponse = extractYouTubePlayerResponse(html);
+
+  return {
+    title: playerResponse?.videoDetails?.title || "youtube-transcript",
+    videoId: playerResponse?.videoDetails?.videoId || parseYouTubeIdentity(url).videoId,
+    subtitleTracks: playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks || []
+  };
+}
+
+function extractYouTubePlayerResponse(text) {
+  const markerIndex = String(text || "").indexOf("ytInitialPlayerResponse");
+  if (markerIndex < 0) return null;
+
+  const json = extractJsonObject(text, markerIndex);
+  if (!json) return null;
+
+  try {
+    return JSON.parse(json);
+  } catch (error) {
+    return null;
+  }
+}
+
+function normalizeYouTubeSubtitles(items) {
+  return items
+    .map((item, index) => {
+      const url = normalizeSubtitleUrl(item.baseUrl || item.url || "");
+      const label = readYouTubeLabel(item.name) || item.languageName || item.languageCode || `字幕 ${index + 1}`;
+      const language = item.languageCode || item.language || "";
+      const isAi = item.kind === "asr" || /自动|auto-generated|asr/i.test(`${label} ${item.kind || ""}`);
+
+      return {
+        index,
+        id: item.vssId || item.id || null,
+        language,
+        languageName: label,
+        isAi,
+        sourceType: isAi ? "自动字幕" : "字幕",
+        url
+      };
+    })
+    .filter((item) => item.url);
+}
+
+function readYouTubeLabel(name) {
+  if (!name) return "";
+  if (typeof name === "string") return name;
+  if (name.simpleText) return name.simpleText;
+  if (Array.isArray(name.runs)) {
+    return name.runs.map((run) => run.text || "").join("");
+  }
+  return "";
 }
 
 function parseVideoIdentity(urlText, options = {}) {
@@ -726,12 +977,13 @@ function normalizeSubtitleUrl(rawUrl) {
   if (!rawUrl) return "";
   if (rawUrl.startsWith("//")) return `https:${rawUrl}`;
   if (rawUrl.startsWith("http://")) return rawUrl.replace(/^http:\/\//, "https://");
+  if (rawUrl.startsWith("/api/timedtext") || rawUrl.startsWith("/timedtext")) return `https://www.youtube.com${rawUrl}`;
   if (rawUrl.startsWith("/")) return `https://www.bilibili.com${rawUrl}`;
   return rawUrl;
 }
 
 function isSubtitleResourceUrl(url) {
-  return /subtitle|caption|aisub|asr/i.test(url) && (/\.json(?:\?|$)/i.test(url) || /aisubtitle|subtitle/i.test(url));
+  return /subtitle|caption|aisub|asr|timedtext/i.test(url) && (/\.json(?:\?|$)/i.test(url) || /aisubtitle|subtitle|caption|timedtext/i.test(url));
 }
 
 function chooseSubtitleIndex(subtitles, requestedIndex) {
@@ -756,6 +1008,88 @@ function chooseSubtitleIndex(subtitles, requestedIndex) {
 async function fetchSubtitleSegments(url, cookie) {
   const subtitleJson = await requestJson(url, cookie, { skipBiliCodeCheck: true });
   return normalizeSegments(subtitleJson.body || subtitleJson.data?.body || []);
+}
+
+async function fetchAnySubtitleSegments(url, cookie) {
+  return isYouTubeSubtitleUrl(url)
+    ? fetchYouTubeSubtitleSegments(url, cookie)
+    : fetchSubtitleSegments(url, cookie);
+}
+
+async function fetchYouTubeSubtitleSegments(url, cookie = "") {
+  const jsonUrl = withYouTubeCaptionFormat(url, "json3");
+  const text = await requestText(jsonUrl, cookie, {
+    referer: "https://www.youtube.com/"
+  });
+
+  try {
+    return normalizeYouTubeJson3Segments(JSON.parse(text));
+  } catch (error) {
+    return normalizeYouTubeXmlSegments(await requestText(url, cookie, {
+      referer: "https://www.youtube.com/"
+    }));
+  }
+}
+
+function isYouTubeSubtitleUrl(url) {
+  return /(^|\/\/)(www\.)?youtube\.com\/api\/timedtext|[?&]fmt=json3|timedtext/i.test(url);
+}
+
+function withYouTubeCaptionFormat(rawUrl, format) {
+  const url = normalizeSubtitleUrl(rawUrl);
+  if (/[?&]fmt=/.test(url)) {
+    return url.replace(/([?&])fmt=[^&]*/i, `$1fmt=${encodeURIComponent(format)}`);
+  }
+
+  return `${url}${url.includes("?") ? "&" : "?"}fmt=${encodeURIComponent(format)}`;
+}
+
+function normalizeYouTubeJson3Segments(json) {
+  const events = Array.isArray(json?.events) ? json.events : [];
+  const segments = events
+    .map((event, index) => {
+      const text = cleanText((event.segs || []).map((seg) => seg.utf8 || "").join(""));
+      const from = Number(event.tStartMs || 0) / 1000;
+      const duration = Number(event.dDurationMs || 0) / 1000;
+
+      return {
+        index: index + 1,
+        from,
+        to: from + Math.max(duration, 0.8),
+        text
+      };
+    })
+    .filter((item) => item.text);
+
+  return removeDuplicateSegments(segments);
+}
+
+function normalizeYouTubeXmlSegments(xml) {
+  const items = [];
+  const pattern = /<text\b([^>]*)>([\s\S]*?)<\/text>/gi;
+  let match;
+
+  while ((match = pattern.exec(xml))) {
+    const attrs = match[1] || "";
+    const from = Number(readXmlAttribute(attrs, "start") || 0);
+    const duration = Number(readXmlAttribute(attrs, "dur") || 0);
+    const text = cleanText(decodeHtmlEntities(match[2] || ""));
+
+    if (!text) continue;
+    items.push({
+      index: items.length + 1,
+      from: Number.isFinite(from) ? from : 0,
+      to: (Number.isFinite(from) ? from : 0) + (Number.isFinite(duration) ? duration : 2),
+      text
+    });
+  }
+
+  return removeDuplicateSegments(items);
+}
+
+function readXmlAttribute(attrs, name) {
+  const match = attrs.match(new RegExp(`${name}="([^"]*)"`, "i"));
+  return match?.[1] || "";
 }
 
 function normalizeSegments(items) {
@@ -889,7 +1223,7 @@ function analyzeTranscriptQuality(rawSegments, mergedSegments) {
     musicLikeRatio,
     meaningfulChars: meaningfulText.length,
     warning: unusable
-      ? "B站返回的字幕轨几乎没有有效文字，画面里的硬字幕需要 OCR 或语音识别提取。"
+      ? "字幕轨几乎没有有效文字，画面里的硬字幕需要 OCR 或语音识别提取。"
       : ""
   };
 }
@@ -1019,10 +1353,90 @@ async function requestJson(url, cookie = "", options = {}) {
   return json;
 }
 
+async function requestText(url, cookie = "", options = {}) {
+  const headers = {
+    "Accept": "application/json, text/xml, text/plain, */*",
+    "Referer": options.referer || "https://www.bilibili.com/",
+    "User-Agent": "Mozilla/5.0"
+  };
+  if (cookie) headers.Cookie = cookie;
+
+  const response = await fetch(url, {
+    headers,
+    cache: "no-store"
+  });
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+
+  return response.text();
+}
+
+function extractJsonObject(text, markerIndex) {
+  const start = text.indexOf("{", markerIndex);
+  if (start < 0) return "";
+
+  let depth = 0;
+  let inString = false;
+  let quote = "";
+  let escaped = false;
+
+  for (let index = start; index < text.length; index += 1) {
+    const char = text[index];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === quote) {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === "\"" || char === "'") {
+      inString = true;
+      quote = char;
+      continue;
+    }
+
+    if (char === "{") depth += 1;
+    if (char === "}") depth -= 1;
+
+    if (depth === 0) {
+      return text.slice(start, index + 1);
+    }
+  }
+
+  return "";
+}
+
+function decodeHtmlEntities(text) {
+  const named = {
+    amp: "&",
+    lt: "<",
+    gt: ">",
+    quot: "\"",
+    apos: "'",
+    "#39": "'"
+  };
+
+  return String(text || "").replace(/&(#x?[0-9a-f]+|[a-z]+);/gi, (entity, body) => {
+    const key = body.toLowerCase();
+    if (named[key]) return named[key];
+    if (key.startsWith("#x")) return String.fromCodePoint(Number.parseInt(key.slice(2), 16));
+    if (key.startsWith("#")) return String.fromCodePoint(Number.parseInt(key.slice(1), 10));
+    return entity;
+  });
+}
+
 function printSubtitleList(result) {
   console.log(`视频：${result.video.title}`);
-  console.log(`bvid：${result.video.bvid}`);
-  console.log(`cid：${result.video.cid}`);
+  if (result.video.videoId) console.log(`videoId：${result.video.videoId}`);
+  if (result.video.bvid) console.log(`bvid：${result.video.bvid}`);
+  if (result.video.cid) console.log(`cid：${result.video.cid}`);
   console.log("字幕列表：");
   for (const subtitle of result.subtitles) {
     console.log(`- [${subtitle.index}] ${subtitle.languageName} · ${subtitle.isAi ? "AI" : "字幕"}`);
@@ -1032,7 +1446,7 @@ function printSubtitleList(result) {
 function printHelp() {
   console.log(`
 用法：
-  node scripts/download-subtitle.mjs "<B站视频URL>" [选项]
+  node scripts/download-subtitle.mjs "<B站或 YouTube 视频URL>" [选项]
 
 选项：
   -o, --out <目录>             输出目录，默认 downloads
@@ -1041,7 +1455,7 @@ function printHelp() {
   -i, --subtitle-index <序号>  指定字幕序号，默认自动选择中文/AI
       --list                   只列出字幕，不写文件
       --subtitle-url <URL>     直接下载指定字幕 JSON URL，适合配合页面插件复制的命令
-      --allow-api              跳过浏览器抓取，直接使用 B 站接口字幕；可能和播放器画面字幕不一致
+      --allow-api              跳过浏览器抓取，直接使用平台页面/接口字幕；B 站可能和播放器画面字幕不一致
       --headed                 浏览器抓取时显示 Chrome 窗口，方便观察
       --browser-timeout <毫秒> 浏览器页面加载超时，默认 20000
       --browser-channel <名称> Playwright 浏览器 channel，默认 chrome
@@ -1051,8 +1465,9 @@ function printHelp() {
 
 示例：
   node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx"
+  node scripts/download-subtitle.mjs "https://www.youtube.com/watch?v=xxxxxxxxxxx"
   node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx" --headed
-  node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx" --format txt --out ./downloads
+  node scripts/download-subtitle.mjs "https://www.youtube.com/watch?v=xxxxxxxxxxx" --format txt --out ./downloads
   node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx" --allow-api
   node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx" --cookie-file ./bili.cookie.txt
   node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx" --subtitle-url "https://..."

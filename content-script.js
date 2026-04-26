@@ -1,4 +1,4 @@
-const SCRIPT_VERSION = "1.2.3";
+const SCRIPT_VERSION = "1.3.0";
 let subtitleResourceSince = 0;
 let subtitleResourcePageKey = "";
 const subtitleResourceRecords = [];
@@ -17,6 +17,14 @@ resetSubtitleResourceWindow(getPageKey(), performance.now() - 1000);
 installTranscriptPanel();
 
 function readPageInfo() {
+  if (isYouTubePage()) {
+    return readYouTubePageInfo();
+  }
+
+  return readBilibiliPageInfo();
+}
+
+function readBilibiliPageInfo() {
   const urlInfo = readUrlVideoInfo();
   const state = readInitialState();
   const videoData = state?.videoData || state?.videoInfo || {};
@@ -55,6 +63,44 @@ function readPageInfo() {
   };
 }
 
+function readYouTubePageInfo() {
+  const playerResponse = readYouTubePlayerResponse();
+  const details = playerResponse?.videoDetails || {};
+  const captionTracks = playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
+  const visibleSubtitle = readVisibleSubtitleText();
+  const subtitleTracks = normalizeYouTubeSubtitleTracks(captionTracks);
+  const videoId = readYouTubeVideoId() || details.videoId || "";
+
+  return {
+    platform: "youtube",
+    title: details.title || getCleanDocumentTitle() || "youtube-transcript",
+    videoId,
+    visibleSubtitle,
+    subtitleAvailable: Boolean(subtitleTracks.length || visibleSubtitle),
+    subtitleAvailability: {
+      available: Boolean(subtitleTracks.length || visibleSubtitle),
+      reason: subtitleTracks.length ? "youtube-caption-tracks" : (visibleSubtitle ? "visible-subtitle" : "no-youtube-caption-track")
+    },
+    subtitleTracks,
+    subtitleResources: []
+  };
+}
+
+function normalizeYouTubeSubtitleTracks(items) {
+  return items
+    .map((item) => ({
+      baseUrl: item.baseUrl || "",
+      url: item.baseUrl || "",
+      name: item.name || null,
+      languageName: readYouTubeText(item.name),
+      languageCode: item.languageCode || "",
+      vssId: item.vssId || "",
+      kind: item.kind || "",
+      isTranslatable: Boolean(item.isTranslatable)
+    }))
+    .filter((item) => item.url);
+}
+
 function readSubtitleResourceUrls(visibleSubtitle = "") {
   const urls = [];
   const currentPageKey = getPageKey();
@@ -88,7 +134,11 @@ function readSubtitleResourceUrls(visibleSubtitle = "") {
 }
 
 function isSubtitleResourceUrl(url) {
-  return /subtitle|caption|aisub|asr/i.test(url) && /\.json(?:\?|$)|aisubtitle|subtitle/i.test(url);
+  return /subtitle|caption|aisub|asr|timedtext/i.test(url) && /\.json(?:\?|$)|aisubtitle|subtitle|caption|timedtext/i.test(url);
+}
+
+function isYouTubePage() {
+  return /(^|\.)youtube\.com$/i.test(location.hostname) || /^youtu\.be$/i.test(location.hostname);
 }
 
 function installSubtitleResourceObserver() {
@@ -182,6 +232,7 @@ function findSubtitleControls() {
     "[class*='subtitle']",
     "[class*='Subtitle']",
     "[class*='caption']",
+    ".ytp-subtitles-button",
     ".bpx-player-ctrl-subtitle",
     ".bilibili-player-video-btn-subtitle"
   ];
@@ -245,6 +296,9 @@ function isInsideTranscriptPanel(element) {
 
 function readVisibleSubtitleText() {
   const selectors = [
+    ".ytp-caption-segment",
+    ".ytp-caption-window-container",
+    ".captions-text",
     ".bpx-player-subtitle-panel-text",
     ".bpx-player-subtitle-panel",
     ".bilibili-player-video-subtitle",
@@ -274,6 +328,7 @@ function cleanDomText(text) {
 function readUrlVideoInfo() {
   try {
     const url = new URL(location.href);
+    const youtubeVideoId = readYouTubeVideoId(url);
     const bvidMatch = url.pathname.match(/\/video\/(BV[0-9A-Za-z]+)/);
     const aidMatch = url.pathname.match(/\/video\/av(\d+)/i);
     const page = Number(url.searchParams.get("p") || 1);
@@ -282,6 +337,7 @@ function readUrlVideoInfo() {
     return {
       bvid: bvidMatch?.[1] || "",
       aid: aidMatch?.[1] || "",
+      videoId: youtubeVideoId,
       cid: Number.isFinite(cid) && cid > 0 ? cid : "",
       page: Number.isFinite(page) && page > 0 ? page : 1
     };
@@ -289,6 +345,7 @@ function readUrlVideoInfo() {
     return {
       bvid: "",
       aid: "",
+      videoId: "",
       cid: "",
       page: 1
     };
@@ -299,6 +356,7 @@ function getCleanDocumentTitle() {
   return document.title
     .replace(/_哔哩哔哩_bilibili$/, "")
     .replace(/-哔哩哔哩$/, "")
+    .replace(/ - YouTube$/, "")
     .trim();
 }
 
@@ -306,6 +364,21 @@ function readPageNumber() {
   const url = new URL(location.href);
   const page = Number(url.searchParams.get("p") || 1);
   return Number.isFinite(page) && page > 0 ? page : 1;
+}
+
+function readYouTubeVideoId(url = new URL(location.href)) {
+  const host = url.hostname.replace(/^www\./, "");
+  if (host === "youtu.be") {
+    return url.pathname.split("/").filter(Boolean)[0] || "";
+  }
+
+  if (!/youtube\.com$/i.test(host)) return "";
+
+  const watchId = url.searchParams.get("v");
+  if (watchId) return watchId;
+
+  const shortsMatch = url.pathname.match(/^\/shorts\/([^/?#]+)/);
+  return shortsMatch?.[1] || "";
 }
 
 function readInitialState() {
@@ -325,6 +398,35 @@ function readInitialState() {
   }
 
   return null;
+}
+
+function readYouTubePlayerResponse() {
+  for (const script of document.scripts) {
+    const text = script.textContent || "";
+    const markerIndex = text.indexOf("ytInitialPlayerResponse");
+    if (markerIndex < 0) continue;
+
+    const json = extractJsonObject(text, markerIndex);
+    if (!json) continue;
+
+    try {
+      return JSON.parse(json);
+    } catch (error) {
+      return null;
+    }
+  }
+
+  return null;
+}
+
+function readYouTubeText(value) {
+  if (!value) return "";
+  if (typeof value === "string") return value;
+  if (value.simpleText) return value.simpleText;
+  if (Array.isArray(value.runs)) {
+    return value.runs.map((run) => run.text || "").join("");
+  }
+  return "";
 }
 
 function extractJsonObject(text, markerIndex) {
@@ -559,9 +661,9 @@ function installTranscriptPanel() {
       }
     </style>
     <button class="trigger" type="button">字幕稿</button>
-    <section class="panel" aria-label="B站字幕稿面板">
+    <section class="panel" aria-label="视频字幕稿面板">
       <div class="top">
-        <div class="title">B站字幕稿</div>
+        <div class="title">视频字幕稿</div>
         <div class="top-actions">
           <button class="mini reload" type="button">重读</button>
           <button class="close" type="button" title="关闭" aria-label="关闭">×</button>
@@ -745,7 +847,7 @@ function installTranscriptPanel() {
 
   function renderResult() {
     const title = [currentResult.video.title, currentResult.video.partTitle].filter(Boolean).join(" / ");
-    ui.title.textContent = title || "B站字幕稿";
+    ui.title.textContent = title || "视频字幕稿";
     ui.subtitle.textContent = "";
 
     for (const subtitle of currentResult.subtitles) {
@@ -787,7 +889,7 @@ function installTranscriptPanel() {
     currentResult = null;
     loadedPageKey = "";
     resetSubtitleResourceWindow(getPageKey(), performance.now() - 1500);
-    ui.title.textContent = "B站字幕稿";
+    ui.title.textContent = "视频字幕稿";
     ui.text.value = "";
     ui.subtitle.textContent = "";
 
@@ -865,6 +967,7 @@ function doesResultMatchCurrentPage(result) {
   const title = normalizeTitleForCompare(getCleanDocumentTitle());
   const resultTitle = normalizeTitleForCompare(video.title || "");
 
+  if (urlInfo.videoId && video.videoId && urlInfo.videoId !== video.videoId) return false;
   if (urlInfo.bvid && video.bvid && urlInfo.bvid !== video.bvid) return false;
   if (urlInfo.aid && video.aid && String(urlInfo.aid) !== String(video.aid)) return false;
   if (urlInfo.page && video.page && Number(urlInfo.page) !== Number(video.page)) return false;
@@ -889,6 +992,7 @@ function titleIncludesEither(left, right) {
 function formatVideoDebug(video) {
   if (!video) return "";
   const parts = [];
+  if (video.videoId) parts.push(`YouTube:${video.videoId}`);
   if (video.bvid) parts.push(video.bvid);
   if (video.cid) parts.push(`cid:${video.cid}`);
   if (!parts.length) return "";
@@ -902,11 +1006,11 @@ function isRetriableReadError(message) {
 function formatUserFacingError(message) {
   const text = String(message || "");
   if (/Extension context invalidated|context invalidated/i.test(text)) {
-    return "插件刚更新或在扩展页被重新加载了，请刷新当前 B 站视频页面一次。";
+    return "插件刚更新或在扩展页被重新加载了，请刷新当前视频页面一次。";
   }
 
   if (/Receiving end does not exist|Could not establish connection/i.test(text)) {
-    return "页面脚本还没有接上插件，请刷新当前 B 站视频页面一次。";
+    return "页面脚本还没有接上插件，请刷新当前视频页面一次。";
   }
 
   return text;
@@ -942,11 +1046,13 @@ function waitForStablePageKey(targetKey, stableMs = 900, timeoutMs = 5000) {
 function getPageKey() {
   try {
     const url = new URL(location.href);
+    const youtubeVideoId = readYouTubeVideoId(url);
     const videoMatch = url.pathname.match(/\/video\/(BV[0-9A-Za-z]+|av\d+)/i);
     const bangumiMatch = url.pathname.match(/\/bangumi\/play\/(ep\d+|ss\d+)/i);
     const page = url.searchParams.get("p") || "1";
     const cid = url.searchParams.get("cid") || "";
 
+    if (youtubeVideoId) return `youtube:${youtubeVideoId}`;
     if (videoMatch) return `video:${videoMatch[1]}:p=${page}:cid=${cid}`;
     if (bangumiMatch) return `bangumi:${bangumiMatch[1]}:p=${page}:cid=${cid}`;
     return `${url.pathname}?p=${page}&cid=${cid}`;

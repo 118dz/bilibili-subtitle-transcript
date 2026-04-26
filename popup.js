@@ -37,8 +37,8 @@ async function init() {
     const tabs = await chromeTabsQuery({ active: true, currentWindow: true });
     activeTab = tabs[0] || null;
 
-    if (!activeTab?.url || !/https:\/\/www\.bilibili\.com\/(video|bangumi\/play)\//.test(activeTab.url)) {
-      setBusy(false, "请先打开一个 B 站视频播放页。", true);
+    if (!activeTab?.url || !isSupportedVideoUrl(activeTab.url)) {
+      setBusy(false, "请先打开 B 站或 YouTube 视频播放页。", true);
       return;
     }
 
@@ -99,7 +99,7 @@ async function loadTranscript(subtitleIndex = null) {
 
 function renderResult(result) {
   const title = [result.video.title, result.video.partTitle].filter(Boolean).join(" / ");
-  elements.videoTitle.textContent = title || "B站视频";
+  elements.videoTitle.textContent = title || "视频";
 
   renderSubtitleOptions(result.subtitles, result.selectedIndex);
   renderTranscript();
@@ -184,6 +184,20 @@ function chromeTabsQuery(queryInfo) {
   return chromeCall((done) => chrome.tabs.query(queryInfo, done), "读取当前标签页超时");
 }
 
+function isSupportedVideoUrl(urlText) {
+  try {
+    const url = new URL(urlText);
+    const host = url.hostname.replace(/^www\./, "");
+    if (host === "bilibili.com") return /^\/(video|bangumi\/play)\//.test(url.pathname);
+    if (host === "youtube.com" || host === "m.youtube.com") return url.pathname === "/watch" || url.pathname.startsWith("/shorts/");
+    if (host === "youtu.be") return Boolean(url.pathname.split("/").filter(Boolean)[0]);
+  } catch (error) {
+    return false;
+  }
+
+  return false;
+}
+
 function chromeSendTabMessage(tabId, message) {
   return chromeCall((done) => chrome.tabs.sendMessage(tabId, message, done), "读取页面信息超时", 2500);
 }
@@ -231,11 +245,11 @@ function chromeCall(start, timeoutMessage, timeoutMs = 5000) {
 function formatUserFacingError(message) {
   const text = String(message || "");
   if (/Extension context invalidated|context invalidated/i.test(text)) {
-    return "插件刚更新或在扩展页被重新加载了，请刷新当前 B 站视频页面一次。";
+    return "插件刚更新或在扩展页被重新加载了，请刷新当前视频页面一次。";
   }
 
   if (/Receiving end does not exist|Could not establish connection/i.test(text)) {
-    return "页面脚本还没有接上插件，请刷新当前 B 站视频页面一次。";
+    return "页面脚本还没有接上插件，请刷新当前视频页面一次。";
   }
 
   return text;

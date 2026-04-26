@@ -1,5 +1,11 @@
 # 更新日志
 
+## 1.3.0
+
+- 新增 YouTube 字幕读取：支持从 YouTube 视频页读取已有自动字幕或人工字幕，并导出 TXT/SRT。
+- 插件会按当前页面自动切换 B 站或 YouTube 处理逻辑。
+- CLI 支持直接传入 YouTube 视频 URL，也支持下载 YouTube `timedtext` 字幕源 URL。
+
 ## 1.2.3
 
 - 移除页面内联脚本注入，避免触发 B 站 Content Security Policy 报错。
