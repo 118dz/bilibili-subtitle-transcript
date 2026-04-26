@@ -1,4 +1,4 @@
-const SCRIPT_VERSION = "1.1.2";
+const SCRIPT_VERSION = "1.1.3";
 let subtitleResourceSince = 0;
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -29,7 +29,8 @@ function readPageInfo() {
   );
   const currentPage = pages[Math.max(0, page - 1)] || {};
   const visibleSubtitle = readVisibleSubtitleText();
-  const subtitleAvailability = readSubtitleAvailability(visibleSubtitle);
+  const subtitleResources = readSubtitleResourceUrls();
+  const subtitleAvailability = readSubtitleAvailability(visibleSubtitle, subtitleResources);
 
   return {
     title: getCleanDocumentTitle(),
@@ -41,7 +42,7 @@ function readPageInfo() {
     visibleSubtitle,
     subtitleAvailable: subtitleAvailability.available,
     subtitleAvailability,
-    subtitleResources: subtitleAvailability.available ? readSubtitleResourceUrls() : [],
+    subtitleResources: subtitleAvailability.available ? subtitleResources : [],
     pages: stateMatchesUrl ? pages.map((item) => ({
       cid: item.cid,
       page: item.page,
@@ -77,7 +78,7 @@ function isSubtitleResourceUrl(url) {
   return /subtitle|caption|aisub|asr/i.test(url) && /\.json(?:\?|$)|aisubtitle|subtitle/i.test(url);
 }
 
-function readSubtitleAvailability(visibleSubtitle = "") {
+function readSubtitleAvailability(visibleSubtitle = "", subtitleResources = []) {
   if (visibleSubtitle) {
     return {
       available: true,
@@ -93,18 +94,25 @@ function readSubtitleAvailability(visibleSubtitle = "") {
     };
   }
 
+  if (subtitleResources.length) {
+    return {
+      available: true,
+      reason: "player-subtitle-resource"
+    };
+  }
+
   const controls = findSubtitleControls();
   if (!controls.length) {
     return {
       available: false,
-      reason: "no-subtitle-control"
+      reason: "no-player-subtitle-resource"
     };
   }
 
   const enabled = controls.some((element) => !isDisabledSubtitleControl(element));
   return {
-    available: enabled,
-    reason: enabled ? "subtitle-control" : "disabled-subtitle-control"
+    available: false,
+    reason: enabled ? "subtitle-control-without-resource" : "disabled-subtitle-control"
   };
 }
 

@@ -30,21 +30,17 @@ async function fetchTranscript(payload = {}) {
   }
 
   if (payload.pageInfo?.subtitleAvailable === false) {
-    throw new Error("当前视频播放器没有字幕入口，插件不会使用接口或旧资源里的其他字幕。");
+    throw new Error("当前播放器没有检测到可读取字幕。请先在播放器里开启字幕后重读；如果播放器提示没有字幕，则此视频没有字幕文件。");
   }
 
   const playerResourceSubtitles = await fetchPlayerResourceSubtitles(payload.pageInfo);
-  const playerInfo = await fetchPlayerInfo({ bvid, aid, cid }).catch(() => null);
-  const subtitles = [
-    ...playerResourceSubtitles,
-    ...normalizeSubtitles(playerInfo?.subtitle?.subtitles || [])
-  ].map((item, index) => ({
+  const subtitles = playerResourceSubtitles.map((item, index) => ({
     ...item,
     index
   }));
 
   if (!subtitles.length) {
-    throw new Error("这个视频没有可读取的字幕文件。若你看到的是画面自带字幕，插件不能直接下载，只能用 OCR 或语音识别。");
+    throw new Error("当前播放器没有加载字幕资源。请先在 B 站播放器里开启字幕后重读；若播放器提示没有字幕，则此视频没有字幕文件。");
   }
 
   const selectedIndex = chooseSubtitleIndex(subtitles, payload.subtitleIndex);
@@ -97,6 +93,7 @@ async function fetchPlayerResourceSubtitles(pageInfo = {}) {
       const visible = normalizeForMatch(visibleSubtitle);
       const matchVisible = Boolean(visible && text.includes(visible.slice(0, Math.min(visible.length, 24))));
 
+      if (visible && !matchVisible) continue;
       if (!quality.usable && !matchVisible) continue;
 
       candidates.push({
