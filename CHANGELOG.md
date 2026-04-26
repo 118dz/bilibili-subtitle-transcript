@@ -5,6 +5,8 @@
 - 新增命令行字幕下载工具 `scripts/download-subtitle.mjs`。
 - 支持给定 B 站 URL 直接导出 TXT、SRT 和 JSON。
 - 支持通过 `--cookie`、`--cookie-file` 或 `BILI_COOKIE` 读取登录态字幕。
+- 支持 `--subtitle-url` 直接下载页面插件实际使用的字幕源。
+- 页面插件新增「命令」按钮，可复制本地下载命令。
 
 ## 1.0.0
 

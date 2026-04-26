@@ -1,4 +1,4 @@
-const SCRIPT_VERSION = "1.0.0";
+const SCRIPT_VERSION = "1.1.1";
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || message.type !== "BILI_SUBTITLE_PAGE_INFO") {
@@ -350,7 +350,7 @@ function installTranscriptPanel() {
 
       .actions {
         display: grid;
-        grid-template-columns: 1fr 76px 76px;
+        grid-template-columns: 1fr 76px 76px 76px;
         gap: 8px;
       }
 
@@ -407,6 +407,7 @@ function installTranscriptPanel() {
       <textarea class="text" spellcheck="false" placeholder="字幕内容会显示在这里"></textarea>
       <div class="actions">
         <button class="action copy" type="button" disabled>复制</button>
+        <button class="action command" type="button" disabled>命令</button>
         <button class="action txt" type="button" disabled>TXT</button>
         <button class="action srt" type="button" disabled>SRT</button>
       </div>
@@ -424,6 +425,7 @@ function installTranscriptPanel() {
     timestamp: shadow.querySelector(".timestamp"),
     text: shadow.querySelector(".text"),
     copy: shadow.querySelector(".copy"),
+    command: shadow.querySelector(".command"),
     txt: shadow.querySelector(".txt"),
     srt: shadow.querySelector(".srt"),
     status: shadow.querySelector(".status")
@@ -457,6 +459,27 @@ function installTranscriptPanel() {
       setStatus("已复制到剪贴板。");
     } catch (error) {
       setStatus("复制失败，请手动选中文字复制。", true);
+    }
+  });
+  ui.command.addEventListener("click", async () => {
+    const subtitle = getSelectedSubtitle();
+    if (!subtitle?.url) {
+      setStatus("当前字幕没有可复制的源 URL。", true);
+      return;
+    }
+
+    const command = [
+      "node scripts/download-subtitle.mjs",
+      shellQuote(location.href),
+      "--subtitle-url",
+      shellQuote(subtitle.url)
+    ].join(" ");
+
+    try {
+      await navigator.clipboard.writeText(command);
+      setStatus("已复制本地下载命令。");
+    } catch (error) {
+      setStatus("复制命令失败，请手动复制字幕源。", true);
     }
   });
   ui.txt.addEventListener("click", () => downloadText("txt"));
@@ -608,6 +631,7 @@ function installTranscriptPanel() {
 
   function setActionsEnabled(enabled) {
     ui.copy.disabled = !enabled;
+    ui.command.disabled = !enabled;
     ui.txt.disabled = !enabled;
     ui.srt.disabled = !enabled;
   }
@@ -626,6 +650,18 @@ function installTranscriptPanel() {
 
     setStatus(`已整理 ${result.segments.length} 段文字稿。${debug}`);
   }
+
+  function getSelectedSubtitle() {
+    if (!currentResult?.subtitles?.length) return null;
+    const selected = Number(ui.subtitle.value);
+    return currentResult.subtitles.find((subtitle) => subtitle.index === selected) ||
+      currentResult.subtitles[currentResult.selectedIndex] ||
+      currentResult.subtitles[0];
+  }
+}
+
+function shellQuote(text) {
+  return `'${String(text || "").replace(/'/g, "'\\''")}'`;
 }
 
 function doesResultMatchCurrentPage(result) {

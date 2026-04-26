@@ -12,17 +12,23 @@ main().catch((error) => {
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
-  if (options.help || !options.url) {
+  if (options.help || (!options.url && !options.subtitleUrl)) {
     printHelp();
     process.exit(options.help ? 0 : 1);
   }
 
   const cookie = await readCookie(options);
-  const result = await downloadSubtitle(options.url, {
-    cookie,
-    page: options.page,
-    subtitleIndex: options.subtitleIndex
-  });
+  const result = options.subtitleUrl
+    ? await downloadSubtitleUrl(options.subtitleUrl, {
+        cookie,
+        pageUrl: options.url,
+        page: options.page
+      })
+    : await downloadSubtitle(options.url, {
+        cookie,
+        page: options.page,
+        subtitleIndex: options.subtitleIndex
+      });
 
   if (options.list) {
     printSubtitleList(result);
@@ -62,6 +68,7 @@ function parseArgs(args) {
     format: "all",
     page: null,
     subtitleIndex: null,
+    subtitleUrl: "",
     cookie: "",
     cookieFile: "",
     list: false,
@@ -81,6 +88,8 @@ function parseArgs(args) {
       options.page = Number(readValue(args, ++index, arg));
     } else if (arg === "--subtitle-index" || arg === "-i") {
       options.subtitleIndex = Number(readValue(args, ++index, arg));
+    } else if (arg === "--subtitle-url") {
+      options.subtitleUrl = readValue(args, ++index, arg);
     } else if (arg === "--cookie") {
       options.cookie = readValue(args, ++index, arg);
     } else if (arg === "--cookie-file") {
@@ -189,6 +198,86 @@ async function downloadSubtitle(url, options = {}) {
     timestampText: formatTimestampText(segments),
     srtText: formatSrtText(rawSegments)
   };
+}
+
+async function downloadSubtitleUrl(subtitleUrl, options = {}) {
+  const video = await readVideoFromPageUrl(options.pageUrl, options.cookie, options.page);
+  const normalizedUrl = normalizeSubtitleUrl(subtitleUrl);
+  const rawSegments = await fetchSubtitleSegments(normalizedUrl, options.cookie);
+  if (!rawSegments.length) {
+    throw new Error("字幕源 URL 里没有正文内容");
+  }
+
+  const segments = buildTranscriptSegments(rawSegments);
+  const quality = analyzeTranscriptQuality(rawSegments, segments);
+
+  return {
+    video,
+    subtitles: [
+      {
+        index: 0,
+        id: null,
+        language: "",
+        languageName: "指定字幕源",
+        isAi: /ai|asr|subtitle/i.test(normalizedUrl),
+        sourceType: "字幕源",
+        url: normalizedUrl
+      }
+    ],
+    selectedIndex: 0,
+    selectedSubtitle: {
+      index: 0,
+      id: null,
+      language: "",
+      languageName: "指定字幕源",
+      isAi: /ai|asr|subtitle/i.test(normalizedUrl),
+      sourceType: "字幕源",
+      url: normalizedUrl
+    },
+    rawSegments,
+    segments,
+    quality,
+    plainText: formatPlainText(segments),
+    timestampText: formatTimestampText(segments),
+    srtText: formatSrtText(rawSegments)
+  };
+}
+
+async function readVideoFromPageUrl(pageUrl, cookie, pageOverride) {
+  if (!pageUrl) {
+    return {
+      title: "bilibili-subtitle",
+      partTitle: "",
+      bvid: "",
+      aid: "",
+      cid: "",
+      page: 1
+    };
+  }
+
+  try {
+    const identity = parseVideoIdentity(pageUrl, { page: pageOverride });
+    const view = await fetchView(identity, cookie);
+    const page = selectPage(identity, view);
+
+    return {
+      title: view.title || "bilibili-subtitle",
+      partTitle: page?.part || "",
+      bvid: view.bvid || identity.bvid || "",
+      aid: view.aid || identity.aid || "",
+      cid: page?.cid || identity.cid || "",
+      page: page?.page || identity.page || 1
+    };
+  } catch (error) {
+    return {
+      title: "bilibili-subtitle",
+      partTitle: "",
+      bvid: "",
+      aid: "",
+      cid: "",
+      page: 1
+    };
+  }
 }
 
 function parseVideoIdentity(urlText, options = {}) {
@@ -593,6 +682,7 @@ function printHelp() {
   -p, --page <页码>            多 P 视频页码
   -i, --subtitle-index <序号>  指定字幕序号，默认自动选择中文/AI
       --list                   只列出字幕，不写文件
+      --subtitle-url <URL>     直接下载指定字幕 JSON URL，适合配合页面插件复制的命令
       --cookie <Cookie>        传入 B 站登录 Cookie
       --cookie-file <文件>     从文件读取 B 站登录 Cookie
   -h, --help                   显示帮助
@@ -601,6 +691,7 @@ function printHelp() {
   node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx"
   node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx" --format txt --out ./downloads
   node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx" --cookie-file ./bili.cookie.txt
+  node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx" --subtitle-url "https://..."
 
 也可以用环境变量传 Cookie：
   BILI_COOKIE="SESSDATA=..." node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx"

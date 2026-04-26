@@ -1,5 +1,6 @@
 .DS_Store
 dist/
 downloads/
+*.cookie.txt
 *.log
 node_modules/
