@@ -1,5 +1,10 @@
 # 更新日志
 
+## 1.2.3
+
+- 移除页面内联脚本注入，避免触发 B 站 Content Security Policy 报错。
+- 继续通过插件自身的 URL 轮询和 DOM 监听处理站内切换视频。
+
 ## 1.2.2
 
 - 优化扩展更新后的错误提示：如果 Chrome 提示 `Extension context invalidated`，会明确提示刷新当前 B 站视频页面一次。

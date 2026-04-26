@@ -1,5 +1,4 @@
-const SCRIPT_VERSION = "1.2.2";
-const ROUTE_CHANGE_EVENT = "bili-ai-subtitle-route-change";
+const SCRIPT_VERSION = "1.2.3";
 let subtitleResourceSince = 0;
 let subtitleResourcePageKey = "";
 const subtitleResourceRecords = [];
@@ -13,7 +12,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return false;
 });
 
-installRouteChangeBridge();
 installSubtitleResourceObserver();
 resetSubtitleResourceWindow(getPageKey(), performance.now() - 1000);
 installTranscriptPanel();
@@ -91,39 +89,6 @@ function readSubtitleResourceUrls(visibleSubtitle = "") {
 
 function isSubtitleResourceUrl(url) {
   return /subtitle|caption|aisub|asr/i.test(url) && /\.json(?:\?|$)|aisubtitle|subtitle/i.test(url);
-}
-
-function installRouteChangeBridge() {
-  window.addEventListener(ROUTE_CHANGE_EVENT, () => {
-    if (subtitleResourcePageKey !== getPageKey()) {
-      resetSubtitleResourceWindow(getPageKey(), performance.now() - 1000);
-    }
-  });
-
-  if (document.getElementById("bili-ai-subtitle-route-bridge")) return;
-
-  const script = document.createElement("script");
-  script.id = "bili-ai-subtitle-route-bridge";
-  script.textContent = `
-    (() => {
-      if (window.__biliAiSubtitleRouteBridgeInstalled) return;
-      window.__biliAiSubtitleRouteBridgeInstalled = true;
-      const eventName = ${JSON.stringify(ROUTE_CHANGE_EVENT)};
-      const notify = () => window.dispatchEvent(new CustomEvent(eventName, { detail: { href: location.href } }));
-      for (const methodName of ["pushState", "replaceState"]) {
-        const original = history[methodName];
-        history[methodName] = function patchedHistoryMethod(...args) {
-          const result = original.apply(this, args);
-          setTimeout(notify, 0);
-          return result;
-        };
-      }
-      window.addEventListener("popstate", () => setTimeout(notify, 0));
-      window.addEventListener("hashchange", () => setTimeout(notify, 0));
-    })();
-  `;
-  (document.head || document.documentElement).append(script);
-  script.remove();
 }
 
 function installSubtitleResourceObserver() {
@@ -692,7 +657,6 @@ function installTranscriptPanel() {
   ui.txt.addEventListener("click", () => downloadText("txt"));
   ui.srt.addEventListener("click", () => downloadText("srt"));
   window.setInterval(watchPageChange, 500);
-  window.addEventListener(ROUTE_CHANGE_EVENT, () => window.setTimeout(watchPageChange, 0));
   window.addEventListener("popstate", () => window.setTimeout(watchPageChange, 0));
   window.addEventListener("hashchange", () => window.setTimeout(watchPageChange, 0));
 
