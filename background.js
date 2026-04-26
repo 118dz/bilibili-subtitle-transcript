@@ -34,7 +34,15 @@ async function fetchTranscript(payload = {}) {
   }
 
   const playerResourceSubtitles = await fetchPlayerResourceSubtitles(payload.pageInfo);
-  const subtitles = playerResourceSubtitles.map((item, index) => ({
+  const visibleMatchedSubtitles = playerResourceSubtitles.length
+    ? []
+    : await fetchVisibleMatchedApiSubtitles({
+        bvid,
+        aid,
+        cid,
+        visibleSubtitle: payload.pageInfo?.visibleSubtitle || ""
+      });
+  const subtitles = [...playerResourceSubtitles, ...visibleMatchedSubtitles].map((item, index) => ({
     ...item,
     index
   }));
@@ -109,6 +117,46 @@ async function fetchPlayerResourceSubtitles(pageInfo = {}) {
       });
     } catch (error) {
       // Some performance resource entries are stale or not subtitle JSON.
+    }
+  }
+
+  return candidates
+    .sort((left, right) => right.score - left.score)
+    .slice(0, 3);
+}
+
+async function fetchVisibleMatchedApiSubtitles({ bvid, aid, cid, visibleSubtitle }) {
+  const visible = normalizeForMatch(visibleSubtitle);
+  if (!visible || visible.length < 4) return [];
+
+  const playerInfo = await fetchPlayerInfo({ bvid, aid, cid }).catch(() => null);
+  const apiSubtitles = normalizeSubtitles(playerInfo?.subtitle?.subtitles || []);
+  const candidates = [];
+
+  for (const subtitle of apiSubtitles) {
+    try {
+      const rawSegments = await fetchSubtitleSegments(subtitle.url);
+      if (!rawSegments.length) continue;
+
+      const segments = buildTranscriptSegments(rawSegments);
+      const quality = analyzeTranscriptQuality(rawSegments, segments);
+      const text = normalizeForMatch(segments.map((segment) => segment.text).join(""));
+      const matchVisible = text.includes(visible.slice(0, Math.min(visible.length, 24)));
+
+      if (!matchVisible) continue;
+      if (!quality.usable) continue;
+
+      candidates.push({
+        ...subtitle,
+        languageName: `${subtitle.languageName}（当前画面校验）`,
+        sourceType: "播放器",
+        rawSegments,
+        quality,
+        matchVisible,
+        score: 1000 + quality.meaningfulChars
+      });
+    } catch (error) {
+      // Ignore subtitles that cannot be fetched or do not match the visible player text.
     }
   }
 

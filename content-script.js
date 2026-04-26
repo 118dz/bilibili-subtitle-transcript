@@ -1,5 +1,8 @@
-const SCRIPT_VERSION = "1.1.3";
+const SCRIPT_VERSION = "1.2.1";
+const ROUTE_CHANGE_EVENT = "bili-ai-subtitle-route-change";
 let subtitleResourceSince = 0;
+let subtitleResourcePageKey = "";
+const subtitleResourceRecords = [];
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || message.type !== "BILI_SUBTITLE_PAGE_INFO") {
@@ -10,6 +13,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return false;
 });
 
+installRouteChangeBridge();
+installSubtitleResourceObserver();
+resetSubtitleResourceWindow(getPageKey(), performance.now() - 1000);
 installTranscriptPanel();
 
 function readPageInfo() {
@@ -29,7 +35,7 @@ function readPageInfo() {
   );
   const currentPage = pages[Math.max(0, page - 1)] || {};
   const visibleSubtitle = readVisibleSubtitleText();
-  const subtitleResources = readSubtitleResourceUrls();
+  const subtitleResources = readSubtitleResourceUrls(visibleSubtitle);
   const subtitleAvailability = readSubtitleAvailability(visibleSubtitle, subtitleResources);
 
   return {
@@ -51,14 +57,23 @@ function readPageInfo() {
   };
 }
 
-function readSubtitleResourceUrls() {
+function readSubtitleResourceUrls(visibleSubtitle = "") {
   const urls = [];
+  const currentPageKey = getPageKey();
+  const reliableVisibleSubtitle = normalizeVisibleTextForMatch(visibleSubtitle).length >= 4;
 
   for (const entry of performance.getEntriesByType("resource")) {
     const name = String(entry.name || "");
-    if (subtitleResourceSince && entry.startTime < subtitleResourceSince) continue;
+    if (!reliableVisibleSubtitle && subtitleResourceSince && entry.startTime < subtitleResourceSince) continue;
     if (!isSubtitleResourceUrl(name)) continue;
     urls.push(name);
+  }
+
+  for (const record of subtitleResourceRecords) {
+    if (record.pageKey !== currentPageKey) continue;
+    if (!reliableVisibleSubtitle && subtitleResourceSince && record.startTime < subtitleResourceSince) continue;
+    if (!isSubtitleResourceUrl(record.url)) continue;
+    urls.push(record.url);
   }
 
   for (const element of document.querySelectorAll("track[src], [src*='subtitle'], [href*='subtitle']")) {
@@ -76,6 +91,84 @@ function readSubtitleResourceUrls() {
 
 function isSubtitleResourceUrl(url) {
   return /subtitle|caption|aisub|asr/i.test(url) && /\.json(?:\?|$)|aisubtitle|subtitle/i.test(url);
+}
+
+function installRouteChangeBridge() {
+  window.addEventListener(ROUTE_CHANGE_EVENT, () => {
+    if (subtitleResourcePageKey !== getPageKey()) {
+      resetSubtitleResourceWindow(getPageKey(), performance.now() - 1000);
+    }
+  });
+
+  if (document.getElementById("bili-ai-subtitle-route-bridge")) return;
+
+  const script = document.createElement("script");
+  script.id = "bili-ai-subtitle-route-bridge";
+  script.textContent = `
+    (() => {
+      if (window.__biliAiSubtitleRouteBridgeInstalled) return;
+      window.__biliAiSubtitleRouteBridgeInstalled = true;
+      const eventName = ${JSON.stringify(ROUTE_CHANGE_EVENT)};
+      const notify = () => window.dispatchEvent(new CustomEvent(eventName, { detail: { href: location.href } }));
+      for (const methodName of ["pushState", "replaceState"]) {
+        const original = history[methodName];
+        history[methodName] = function patchedHistoryMethod(...args) {
+          const result = original.apply(this, args);
+          setTimeout(notify, 0);
+          return result;
+        };
+      }
+      window.addEventListener("popstate", () => setTimeout(notify, 0));
+      window.addEventListener("hashchange", () => setTimeout(notify, 0));
+    })();
+  `;
+  (document.head || document.documentElement).append(script);
+  script.remove();
+}
+
+function installSubtitleResourceObserver() {
+  for (const entry of performance.getEntriesByType("resource")) {
+    rememberSubtitleResource(entry.name, entry.startTime);
+  }
+
+  if (!("PerformanceObserver" in window)) return;
+
+  try {
+    const observer = new PerformanceObserver((list) => {
+      for (const entry of list.getEntries()) {
+        rememberSubtitleResource(entry.name, entry.startTime);
+      }
+    });
+    observer.observe({ type: "resource", buffered: true });
+  } catch (error) {
+    // Older Chromium builds may not support buffered resource observers in content scripts.
+  }
+}
+
+function rememberSubtitleResource(rawUrl, startTime = performance.now()) {
+  const url = String(rawUrl || "");
+  if (!isSubtitleResourceUrl(url)) return;
+
+  subtitleResourceRecords.push({
+    url,
+    startTime: Number(startTime) || performance.now(),
+    pageKey: getPageKey()
+  });
+
+  while (subtitleResourceRecords.length > 80) {
+    subtitleResourceRecords.shift();
+  }
+}
+
+function resetSubtitleResourceWindow(pageKey = getPageKey(), since = performance.now() - 1000) {
+  subtitleResourcePageKey = pageKey;
+  subtitleResourceSince = Math.max(0, since);
+}
+
+function normalizeVisibleTextForMatch(text) {
+  return String(text || "")
+    .replace(/[\s\d，。,.!?！？、~～…·\-—_（）()【】[\]{}<>《》"'“”‘’:：;；/\\|+*=#@￥$%^&`♪♫♬♩]/g, "")
+    .trim();
 }
 
 function readSubtitleAvailability(visibleSubtitle = "", subtitleResources = []) {
@@ -599,8 +692,30 @@ function installTranscriptPanel() {
   ui.txt.addEventListener("click", () => downloadText("txt"));
   ui.srt.addEventListener("click", () => downloadText("srt"));
   window.setInterval(watchPageChange, 500);
+  window.addEventListener(ROUTE_CHANGE_EVENT, () => window.setTimeout(watchPageChange, 0));
   window.addEventListener("popstate", () => window.setTimeout(watchPageChange, 0));
   window.addEventListener("hashchange", () => window.setTimeout(watchPageChange, 0));
+
+  const playerObserver = new MutationObserver(() => {
+    if (getPageKey() !== seenPageKey) {
+      watchPageChange();
+      return;
+    }
+
+    if (!ui.panel.classList.contains("open")) return;
+    if (isLoading || currentResult || pendingReloadTimer) return;
+
+    const visibleSubtitle = readVisibleSubtitleText();
+    const subtitleResources = readSubtitleResourceUrls(visibleSubtitle);
+    if (visibleSubtitle || subtitleResources.length) {
+      scheduleReload(250);
+    }
+  });
+  playerObserver.observe(document.documentElement, {
+    childList: true,
+    subtree: true,
+    characterData: true
+  });
 
   async function loadTranscript(subtitleIndex = null, options = {}) {
     if (isLoading) return;
@@ -694,19 +809,20 @@ function installTranscriptPanel() {
     }
   }
 
-  function scheduleReload() {
+  function scheduleReload(delay = 300) {
     window.clearTimeout(pendingReloadTimer);
     pendingReloadTimer = window.setTimeout(async () => {
+      pendingReloadTimer = 0;
       setStatus("检测到页面切换，等待页面稳定...");
       await waitForStablePageKey(getPageKey());
       loadTranscript(null, { retry: 5, delay: 1000 });
-    }, 300);
+    }, delay);
   }
 
   function resetForNewPage() {
     currentResult = null;
     loadedPageKey = "";
-    subtitleResourceSince = performance.now() - 500;
+    resetSubtitleResourceWindow(getPageKey(), performance.now() - 1500);
     ui.title.textContent = "B站字幕稿";
     ui.text.value = "";
     ui.subtitle.textContent = "";
