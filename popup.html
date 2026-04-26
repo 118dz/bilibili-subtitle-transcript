@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>B站字幕稿</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main class="popup">
+      <header class="topbar">
+        <div>
+          <h1>B站字幕稿</h1>
+          <p id="videoTitle" class="video-title">打开 B 站视频页后读取</p>
+        </div>
+        <button id="refreshButton" class="icon-button" type="button" title="重新读取" aria-label="重新读取">↻</button>
+      </header>
+
+      <section class="controls">
+        <label class="field">
+          <span>字幕</span>
+          <select id="subtitleSelect" disabled>
+            <option>等待读取</option>
+          </select>
+        </label>
+        <label class="toggle">
+          <input id="timestampToggle" type="checkbox">
+          <span>时间戳</span>
+        </label>
+      </section>
+
+      <textarea id="transcript" spellcheck="false" placeholder="字幕内容会显示在这里"></textarea>
+
+      <footer class="actions">
+        <button id="copyButton" type="button" disabled>复制</button>
+        <button id="downloadTxtButton" type="button" disabled>TXT</button>
+        <button id="downloadSrtButton" type="button" disabled>SRT</button>
+      </footer>
+
+      <p id="status" class="status" role="status">准备就绪</p>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>
