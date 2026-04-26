@@ -27,7 +27,8 @@ async function main() {
     : await downloadSubtitle(options.url, {
         cookie,
         page: options.page,
-        subtitleIndex: options.subtitleIndex
+        subtitleIndex: options.subtitleIndex,
+        allowApi: options.allowApi
       });
 
   if (options.list) {
@@ -69,6 +70,7 @@ function parseArgs(args) {
     page: null,
     subtitleIndex: null,
     subtitleUrl: "",
+    allowApi: false,
     cookie: "",
     cookieFile: "",
     list: false,
@@ -90,6 +92,8 @@ function parseArgs(args) {
       options.subtitleIndex = Number(readValue(args, ++index, arg));
     } else if (arg === "--subtitle-url") {
       options.subtitleUrl = readValue(args, ++index, arg);
+    } else if (arg === "--allow-api") {
+      options.allowApi = true;
     } else if (arg === "--cookie") {
       options.cookie = readValue(args, ++index, arg);
     } else if (arg === "--cookie-file") {
@@ -146,6 +150,12 @@ function normalizeCookie(cookie) {
 }
 
 async function downloadSubtitle(url, options = {}) {
+  if (!options.allowApi) {
+    throw new Error(
+      "URL-only 模式无法确认播放器实际字幕源，已停止，避免下载到不对应的接口字幕。请先用页面插件点“命令”复制带 --subtitle-url 的命令；若你确认接口字幕就是要的内容，可加 --allow-api。"
+    );
+  }
+
   const identity = parseVideoIdentity(url, options);
   if (!identity.bvid && !identity.aid) {
     throw new Error("没有从 URL 识别到 bvid 或 aid");
@@ -683,17 +693,18 @@ function printHelp() {
   -i, --subtitle-index <序号>  指定字幕序号，默认自动选择中文/AI
       --list                   只列出字幕，不写文件
       --subtitle-url <URL>     直接下载指定字幕 JSON URL，适合配合页面插件复制的命令
+      --allow-api              允许直接使用 B 站接口字幕；可能和播放器画面字幕不一致
       --cookie <Cookie>        传入 B 站登录 Cookie
       --cookie-file <文件>     从文件读取 B 站登录 Cookie
   -h, --help                   显示帮助
 
 示例：
-  node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx"
-  node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx" --format txt --out ./downloads
-  node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx" --cookie-file ./bili.cookie.txt
+  node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx" --allow-api
+  node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx" --allow-api --format txt --out ./downloads
+  node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx" --allow-api --cookie-file ./bili.cookie.txt
   node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx" --subtitle-url "https://..."
 
 也可以用环境变量传 Cookie：
-  BILI_COOKIE="SESSDATA=..." node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx"
+  BILI_COOKIE="SESSDATA=..." node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx" --allow-api
 `.trim());
 }

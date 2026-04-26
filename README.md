@@ -33,10 +33,12 @@
 
 ## 命令行下载字幕
 
-也可以不打开浏览器，直接用 B 站 URL 下载字幕：
+推荐先用页面插件读取字幕，再点「命令」复制本地下载命令。这样会带上 `--subtitle-url`，直接下载插件实际使用的字幕源，最不容易错配。
+
+如果你确认 B 站接口字幕就是你要的内容，也可以只给 B 站 URL，并显式允许接口模式：
 
 ```bash
-node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx"
+node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx" --allow-api
 ```
 
 默认会写入 `downloads/` 目录，并同时生成：
@@ -48,7 +50,7 @@ node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx"
 常用选项：
 
 ```bash
-node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx" --format txt --out ./downloads
+node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx" --allow-api --format txt --out ./downloads
 node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx" --list
 node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx?p=2" --page 2
 ```
@@ -56,16 +58,16 @@ node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx?p=2" -
 有些 AI 字幕需要登录态。如果 URL 直接下载提示没有字幕，可以从浏览器复制 B 站 Cookie 到文本文件，然后：
 
 ```bash
-node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx" --cookie-file ./bili.cookie.txt
+node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx" --allow-api --cookie-file ./bili.cookie.txt
 ```
 
 或使用环境变量：
 
 ```bash
-BILI_COOKIE="SESSDATA=..." node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx"
+BILI_COOKIE="SESSDATA=..." node scripts/download-subtitle.mjs "https://www.bilibili.com/video/BVxxxx" --allow-api
 ```
 
-注意：命令行模式只能下载 B 站接口返回的字幕文件，不能读取播放器画面里的硬字幕；这类视频需要 OCR 或语音识别。
+注意：只给 URL 时，命令行模式只能使用 B 站接口返回的字幕文件，不能确认播放器当前实际显示的字幕源，也不能读取画面硬字幕。为了避免错配，默认不会使用接口字幕，除非传入 `--allow-api`。
 
 如果命令行直接用 B 站 URL 下载到的字幕和页面插件不一致，说明当前视频的播放器字幕资源和 B 站接口字幕不一致。此时可以：
 
@@ -73,4 +75,4 @@ BILI_COOKIE="SESSDATA=..." node scripts/download-subtitle.mjs "https://www.bilib
 2. 点击插件面板里的「命令」按钮。
 3. 回到本地项目目录粘贴执行复制出来的命令。
 
-复制出来的命令会带 `--subtitle-url`，直接下载插件实际使用的字幕源。
+复制出来的命令会带 `--subtitle-url`，直接下载插件实际使用的字幕源，不需要 `--allow-api`。
