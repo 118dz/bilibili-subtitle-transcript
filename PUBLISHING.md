@@ -14,7 +14,7 @@
 
 1. 打开 Chrome Web Store Developer Dashboard。
 2. 新建或选择扩展项目。
-3. 上传 `dist/bilibili-subtitle-transcript-1.0.0.zip`。
+3. 上传 `dist/` 目录里最新版本的 zip，例如 `dist/bilibili-subtitle-transcript-1.2.3.zip`。
 4. 使用 `STORE_LISTING.md` 中的文案填写商店信息。
 5. 使用 `PRIVACY.md` 作为隐私说明参考。
 6. 提交审核。
