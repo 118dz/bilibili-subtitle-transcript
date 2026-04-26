@@ -1,4 +1,4 @@
-const SCRIPT_VERSION = "1.2.1";
+const SCRIPT_VERSION = "1.2.2";
 const ROUTE_CHANGE_EVENT = "bili-ai-subtitle-route-change";
 let subtitleResourceSince = 0;
 let subtitleResourcePageKey = "";
@@ -758,7 +758,7 @@ function installTranscriptPanel() {
       renderResult();
       setResultStatus(currentResult);
     } catch (error) {
-      const message = error.message || String(error);
+      const message = formatUserFacingError(error.message || String(error));
       if (retry > 0 && requestPageKey === getPageKey() && isRetriableReadError(message)) {
         currentResult = null;
         ui.text.value = "";
@@ -933,6 +933,19 @@ function formatVideoDebug(video) {
 
 function isRetriableReadError(message) {
   return /cid|字幕列表|读取字幕|没有可读取|超时|Receiving end does not exist/i.test(message);
+}
+
+function formatUserFacingError(message) {
+  const text = String(message || "");
+  if (/Extension context invalidated|context invalidated/i.test(text)) {
+    return "插件刚更新或在扩展页被重新加载了，请刷新当前 B 站视频页面一次。";
+  }
+
+  if (/Receiving end does not exist|Could not establish connection/i.test(text)) {
+    return "页面脚本还没有接上插件，请刷新当前 B 站视频页面一次。";
+  }
+
+  return text;
 }
 
 function waitForStablePageKey(targetKey, stableMs = 900, timeoutMs = 5000) {

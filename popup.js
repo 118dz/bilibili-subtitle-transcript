@@ -45,7 +45,7 @@ async function init() {
     pageInfo = await readPageInfo(activeTab.id);
     await loadTranscript();
   } catch (error) {
-    setBusy(false, error.message || String(error), true);
+    setBusy(false, formatUserFacingError(error.message || String(error)), true);
   }
 }
 
@@ -93,7 +93,7 @@ async function loadTranscript(subtitleIndex = null) {
     elements.transcript.value = "";
     elements.videoTitle.textContent = "读取失败";
     setActionsEnabled(false);
-    setBusy(false, error.message || String(error), true);
+    setBusy(false, formatUserFacingError(error.message || String(error)), true);
   }
 }
 
@@ -226,4 +226,17 @@ function chromeCall(start, timeoutMessage, timeoutMs = 5000) {
       finish(reject, error);
     }
   });
+}
+
+function formatUserFacingError(message) {
+  const text = String(message || "");
+  if (/Extension context invalidated|context invalidated/i.test(text)) {
+    return "插件刚更新或在扩展页被重新加载了，请刷新当前 B 站视频页面一次。";
+  }
+
+  if (/Receiving end does not exist|Could not establish connection/i.test(text)) {
+    return "页面脚本还没有接上插件，请刷新当前 B 站视频页面一次。";
+  }
+
+  return text;
 }

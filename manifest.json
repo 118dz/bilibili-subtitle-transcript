@@ -3,7 +3,7 @@
   "name": "B站字幕稿",
   "short_name": "B站字幕稿",
   "description": "从 B 站视频页读取 AI 字幕或人工字幕，并整理为可复制的文字稿。",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "icons": {
     "16": "icons/icon16.png",
     "32": "icons/icon32.png",
