@@ -29,6 +29,10 @@ async function fetchTranscript(payload = {}) {
     throw new Error("没有找到当前分 P 的 cid，暂时无法读取字幕。");
   }
 
+  if (payload.pageInfo?.subtitleAvailable === false) {
+    throw new Error("当前视频播放器没有字幕入口，插件不会使用接口或旧资源里的其他字幕。");
+  }
+
   const playerResourceSubtitles = await fetchPlayerResourceSubtitles(payload.pageInfo);
   const playerInfo = await fetchPlayerInfo({ bvid, aid, cid }).catch(() => null);
   const subtitles = [

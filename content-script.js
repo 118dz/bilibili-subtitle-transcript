@@ -1,4 +1,5 @@
-const SCRIPT_VERSION = "1.1.1";
+const SCRIPT_VERSION = "1.1.2";
+let subtitleResourceSince = 0;
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || message.type !== "BILI_SUBTITLE_PAGE_INFO") {
@@ -27,6 +28,8 @@ function readPageInfo() {
     (urlInfo.aid && String(stateAid) === String(urlInfo.aid))
   );
   const currentPage = pages[Math.max(0, page - 1)] || {};
+  const visibleSubtitle = readVisibleSubtitleText();
+  const subtitleAvailability = readSubtitleAvailability(visibleSubtitle);
 
   return {
     title: getCleanDocumentTitle(),
@@ -35,8 +38,10 @@ function readPageInfo() {
     cid: urlInfo.cid || (stateMatchesUrl ? (state?.cid || videoData.cid || currentPage.cid || epInfo.cid || "") : ""),
     page,
     part: stateMatchesUrl ? (currentPage.part || "") : "",
-    visibleSubtitle: readVisibleSubtitleText(),
-    subtitleResources: readSubtitleResourceUrls(),
+    visibleSubtitle,
+    subtitleAvailable: subtitleAvailability.available,
+    subtitleAvailability,
+    subtitleResources: subtitleAvailability.available ? readSubtitleResourceUrls() : [],
     pages: stateMatchesUrl ? pages.map((item) => ({
       cid: item.cid,
       page: item.page,
@@ -50,6 +55,7 @@ function readSubtitleResourceUrls() {
 
   for (const entry of performance.getEntriesByType("resource")) {
     const name = String(entry.name || "");
+    if (subtitleResourceSince && entry.startTime < subtitleResourceSince) continue;
     if (!isSubtitleResourceUrl(name)) continue;
     urls.push(name);
   }
@@ -69,6 +75,106 @@ function readSubtitleResourceUrls() {
 
 function isSubtitleResourceUrl(url) {
   return /subtitle|caption|aisub|asr/i.test(url) && /\.json(?:\?|$)|aisubtitle|subtitle/i.test(url);
+}
+
+function readSubtitleAvailability(visibleSubtitle = "") {
+  if (visibleSubtitle) {
+    return {
+      available: true,
+      reason: "visible-subtitle"
+    };
+  }
+
+  const bodyText = cleanDomText(document.body?.innerText || "");
+  if (/该视频没有字幕|没有字幕，无法|无法开启.*字幕|字幕不可用/.test(bodyText)) {
+    return {
+      available: false,
+      reason: "page-says-no-subtitle"
+    };
+  }
+
+  const controls = findSubtitleControls();
+  if (!controls.length) {
+    return {
+      available: false,
+      reason: "no-subtitle-control"
+    };
+  }
+
+  const enabled = controls.some((element) => !isDisabledSubtitleControl(element));
+  return {
+    available: enabled,
+    reason: enabled ? "subtitle-control" : "disabled-subtitle-control"
+  };
+}
+
+function findSubtitleControls() {
+  const selectors = [
+    "[aria-label*='字幕']",
+    "[title*='字幕']",
+    "[data-title*='字幕']",
+    "[class*='subtitle']",
+    "[class*='Subtitle']",
+    "[class*='caption']",
+    ".bpx-player-ctrl-subtitle",
+    ".bilibili-player-video-btn-subtitle"
+  ];
+  const controls = [];
+  const seen = new Set();
+
+  for (const selector of selectors) {
+    for (const element of document.querySelectorAll(selector)) {
+      if (seen.has(element)) continue;
+      seen.add(element);
+
+      const label = getControlLabel(element);
+      if (!/字幕|subtitle|caption|cc/i.test(label)) continue;
+      if (isInsideTranscriptPanel(element)) continue;
+      if (!looksLikeSubtitleControl(element, label)) continue;
+
+      controls.push(element);
+    }
+  }
+
+  return controls;
+}
+
+function getControlLabel(element) {
+  return [
+    element.getAttribute("aria-label"),
+    element.getAttribute("title"),
+    element.getAttribute("data-title"),
+    element.getAttribute("class"),
+    element.textContent
+  ].filter(Boolean).join(" ");
+}
+
+function looksLikeSubtitleControl(element, label) {
+  const tagName = element.tagName?.toLowerCase() || "";
+  const role = element.getAttribute("role") || "";
+  const controlLike = /button|btn|ctrl|control|switch|toggle|icon|checkbox/i.test(`${tagName} ${role} ${label}`);
+  const panelLike = /panel|text|item|container|wrap|list|menu/i.test(label);
+
+  if (tagName === "button" || role === "button") return true;
+  if (controlLike) return true;
+  if (panelLike) return false;
+
+  return false;
+}
+
+function isDisabledSubtitleControl(element) {
+  const label = getControlLabel(element);
+  const disabledAttr = element.disabled ||
+    element.getAttribute("aria-disabled") === "true" ||
+    element.getAttribute("disabled") !== null;
+  const disabledClass = /\b(disabled|disable|unavailable|forbidden)\b/i.test(element.className || "");
+  const noSubtitleLabel = /没有字幕|無字幕|无法开启.*字幕|字幕不可用/.test(label);
+
+  return Boolean(disabledAttr || disabledClass || noSubtitleLabel);
+}
+
+function isInsideTranscriptPanel(element) {
+  return Boolean(element.closest?.("#bili-ai-transcript-host"));
 }
 
 function readVisibleSubtitleText() {
@@ -592,6 +698,7 @@ function installTranscriptPanel() {
   function resetForNewPage() {
     currentResult = null;
     loadedPageKey = "";
+    subtitleResourceSince = performance.now() - 500;
     ui.title.textContent = "B站字幕稿";
     ui.text.value = "";
     ui.subtitle.textContent = "";
